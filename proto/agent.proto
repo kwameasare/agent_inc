@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package agent;
+
+option go_package = "agentic-engineering-system/proto";
+
+// The service definition for the Generic Agent.
+service GenericAgent {
+  rpc ExecuteTask(TaskRequest) returns (TaskResult) {}
+}
+
+// A sub-task defined by a parent agent.
+message SubTaskRequest {
+  string requested_persona = 1; // e.g., "You are an expert in embedded firmware development."
+  string task_details = 2;
+}
+
+// The request message containing the full instructions for an agent.
+message TaskRequest {
+  string task_id = 1;
+  string persona_prompt = 2;    // The system prompt that defines the agent's role.
+  string task_instructions = 3; // The specific user prompt/task for the agent.
+  map<string, string> context_data = 4; // To pass outputs from other agents.
+}
+
+// The result message from an agent.
+message TaskResult {
+  string task_id = 1;
+  string final_content = 2; // The main artifact (report, code, etc.). Only populated if the task was executed.
+  bool success = 3;
+  string error_message = 4;
+
+  // If the agent decided to delegate, this field will be populated.
+  // The orchestrator MUST handle this by creating sub-agents.
+  repeated SubTaskRequest sub_tasks = 5;
+}

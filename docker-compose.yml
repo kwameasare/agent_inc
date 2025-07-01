@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  # This service is just for building the image so the orchestrator can use it.
+  generic_agent:
+    build:
+      context: ./agents/generic_agent
+      dockerfile: Dockerfile
+    image: agentic-engineering-system_generic_agent # Give it a predictable name
+
+  # The orchestrator is run manually, not as part of compose up.
+  orchestrator:
+    build:
+      context: ./orchestrator
+      dockerfile: Dockerfile
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    # This is crucial: mount the Docker socket so the orchestrator can control Docker.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
