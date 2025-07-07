@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"time"
 
 	"agentic-engineering-system/docker"
 	"agentic-engineering-system/tasks"
@@ -127,9 +128,13 @@ func executeNode(ctx context.Context, wg *sync.WaitGroup, tree *tasktree.Tree, d
 			// Recursively call executeNode for the child.
 			subTaskWg.Add(1)
 			go func(child *tasktree.Node, taskNum int) {
-				defer subTaskWg.Done()
-				executeNode(ctx, &sync.WaitGroup{}, tree, dm, child)
+				executeNode(ctx, &subTaskWg, tree, dm, child)
 			}(childNode, i+1)
+
+			// Add a longer delay between container starts to reduce resource contention
+			if i < len(result.SubTasks)-1 { // Don't delay after the last one
+				time.Sleep(2 * time.Second) // Increased from 500ms
+			}
 		}
 		subTaskWg.Wait() // Wait for all children to finish.
 

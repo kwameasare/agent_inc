@@ -12,8 +12,8 @@ import agent_pb2_grpc
 
 def test_grpc_connection():
     try:
-        # Connect to the agent - test with latest debug container
-        channel = grpc.insecure_channel('localhost:50066')
+        # Connect to the agent - test with orchestrator container on port 50060
+        channel = grpc.insecure_channel('127.0.0.1:50060')
         
         # Wait for the channel to be ready
         grpc.channel_ready_future(channel).result(timeout=5)

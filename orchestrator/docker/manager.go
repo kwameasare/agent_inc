@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"strconv"
 	"sync"
@@ -51,8 +52,11 @@ func (m *Manager) SpawnAgent(ctx context.Context) (*AgentContainer, error) {
 	port := strconv.Itoa(m.nextPort)
 	m.nextPort++
 
+	// Use the exact same approach as manual Docker run that works
+	// docker run --rm -d -p PORT:PORT -e OPENAI_API_KEY=$OPENAI_API_KEY agentic-engineering-system_generic_agent python agent.py PORT
+
 	hostBinding := nat.PortBinding{
-		HostIP:   "0.0.0.0",
+		HostIP:   "", // Use default (empty) instead of "0.0.0.0"
 		HostPort: port,
 	}
 	containerPort, err := nat.NewPort("tcp", port)
@@ -62,12 +66,15 @@ func (m *Manager) SpawnAgent(ctx context.Context) (*AgentContainer, error) {
 
 	portBindings := nat.PortMap{containerPort: []nat.PortBinding{hostBinding}}
 
+	// Create with minimal configuration that matches manual approach
 	resp, err := m.cli.ContainerCreate(ctx, &container.Config{
-		Image: "agentic-engineering-system_generic_agent",                // Make sure this matches your built image name
-		Cmd:   []string{"python", "agent.py", port},                      // Pass the port to the agent
-		Env:   []string{"OPENAI_API_KEY=" + os.Getenv("OPENAI_API_KEY")}, // Pass the API key
+		Image:        "agentic-engineering-system_generic_agent",
+		Cmd:          []string{"python", "agent.py", port},
+		Env:          []string{"OPENAI_API_KEY=" + os.Getenv("OPENAI_API_KEY")},
+		ExposedPorts: nat.PortSet{containerPort: struct{}{}}, // Explicitly expose the port
 	}, &container.HostConfig{
 		PortBindings: portBindings,
+		AutoRemove:   true, // Match the --rm flag from manual approach
 	}, nil, nil, "")
 	if err != nil {
 		return nil, err
@@ -83,7 +90,31 @@ func (m *Manager) SpawnAgent(ctx context.Context) (*AgentContainer, error) {
 
 	// Give the container more time to start its gRPC server and initialize
 	log.Printf("Waiting for agent in container %s to initialize...", resp.ID[:12])
-	time.Sleep(5 * time.Second)
+
+	// Instead of fixed wait, do health checks
+	maxWaitTime := 30 * time.Second
+	checkInterval := 1 * time.Second
+	startTime := time.Now()
+
+	for time.Since(startTime) < maxWaitTime {
+		// Try to connect to the port to see if it's accepting connections
+		conn, err := net.DialTimeout("tcp", "127.0.0.1:"+port, 2*time.Second)
+		if err == nil {
+			conn.Close()
+			log.Printf("✅ Agent container %s is ready and accepting connections", resp.ID[:12])
+			// Give the gRPC server extra time to fully initialize HTTP/2 handling
+			time.Sleep(5 * time.Second)
+			break
+		}
+
+		// Check if we've reached the maximum wait time
+		if time.Since(startTime) >= maxWaitTime {
+			log.Printf("⚠️ Agent container %s did not become ready within %v", resp.ID[:12], maxWaitTime)
+			break
+		}
+
+		time.Sleep(checkInterval)
+	}
 
 	return &AgentContainer{
 		ID:      resp.ID,

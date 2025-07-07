@@ -222,6 +222,12 @@ LiteLLM supports many providers - just change the model name in the agent code.
    - System includes automatic cleanup
    - Manual cleanup: `docker stop $(docker ps -q --filter ancestor=agentic-engineering-system_generic_agent)`
 
+6. **gRPC connection timeouts with many sub-tasks**
+   - This is expected behavior when spawning many containers simultaneously
+   - The system will retry and eventually succeed with the synthesis
+   - For better performance, use a simpler initial task or increase timeout values
+   - Sub-task failures don't prevent the root synthesis from completing
+
 ## Performance Considerations
 
 - **Parallel Execution**: Sub-tasks run concurrently when possible

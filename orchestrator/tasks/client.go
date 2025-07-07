@@ -37,11 +37,16 @@ func ExecuteTaskOnAgent(address, taskID, persona, instructions string, contextDa
 }
 
 func attemptTaskExecution(address, taskID, persona, instructions string, contextData map[string]string) (*pb.TaskResult, error) {
-	// Connect to the agent
+	// Connect to the agent using the exact pattern that works in minimal test
 	log.Printf("🔌 [%s] Establishing gRPC connection to %s", taskID, address)
 
-	// Use the new gRPC client API
-	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// Use the exact same pattern as the working minimal test
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn, err := grpc.DialContext(ctx, address,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gRPC client for %s: %v", address, err)
 	}
@@ -52,7 +57,11 @@ func attemptTaskExecution(address, taskID, persona, instructions string, context
 	// Create gRPC client
 	client := pb.NewGenericAgentClient(conn)
 
-	// Prepare the request
+	// Prepare the request - ensure ContextData is never nil
+	if contextData == nil {
+		contextData = make(map[string]string)
+	}
+
 	request := &pb.TaskRequest{
 		TaskId:           taskID,
 		PersonaPrompt:    persona,
@@ -60,13 +69,9 @@ func attemptTaskExecution(address, taskID, persona, instructions string, context
 		ContextData:      contextData,
 	}
 
-	// Execute the task with a timeout for task execution
-	taskCtx, taskCancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer taskCancel()
-
-	// Execute the task
+	// Execute the task using the same context as connection
 	log.Printf("📤 [%s] Sending task to agent...", taskID)
-	result, err := client.ExecuteTask(taskCtx, request)
+	result, err := client.ExecuteTask(ctx, request)
 	if err != nil {
 		return nil, fmt.Errorf("gRPC call failed: %v", err)
 	}

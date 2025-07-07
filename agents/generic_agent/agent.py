@@ -20,6 +20,7 @@ class GenericAgentServicer(agent_pb2_grpc.GenericAgentServicer):
     def ExecuteTask(self, request, context):
         start_time = time.time()
         logger.info(f"🚀 Agent starting task {request.task_id} with persona: {request.persona_prompt[:100]}...")
+        logger.info(f"🔍 Request details - Task ID: {request.task_id}, Instructions length: {len(request.task_instructions)}, Context data keys: {len(request.context_data)}")
         
         try:
             # Validate API key first
@@ -222,12 +223,20 @@ def serve(port):
         else:
             logger.info("✅ OPENAI_API_KEY found")
         
-        # Create and configure server
-        server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+        # Create and configure server with explicit options for better Go client compatibility
+        options = [
+            ('grpc.keepalive_time_ms', 10000),
+            ('grpc.keepalive_timeout_ms', 3000),
+            ('grpc.keepalive_permit_without_calls', True),
+            ('grpc.http2.max_pings_without_data', 0),
+            ('grpc.http2.min_time_between_pings_ms', 10000),
+            ('grpc.http2.min_ping_interval_without_data_ms', 5000),
+        ]
+        server = grpc.server(futures.ThreadPoolExecutor(max_workers=10), options=options)
         agent_pb2_grpc.add_GenericAgentServicer_to_server(GenericAgentServicer(), server)
         
         # Bind to port
-        listen_addr = f"[::]:{port}"
+        listen_addr = f"0.0.0.0:{port}"
         server.add_insecure_port(listen_addr)
         
         # Start server
