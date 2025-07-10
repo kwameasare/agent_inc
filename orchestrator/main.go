@@ -221,12 +221,15 @@ func handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 
 	// Create response without context
 	response := TaskExecution{
-		ID:      execution.ID,
-		Task:    execution.Task,
-		Status:  execution.Status,
-		Result:  execution.Result,
-		Error:   execution.Error,
-		Started: execution.Started,
+		ID:                   execution.ID,
+		Task:                 execution.Task,
+		Status:               execution.Status,
+		Result:               execution.Result,
+		Error:                execution.Error,
+		Started:              execution.Started,
+		Phases:               execution.Phases,
+		CurrentPhase:         execution.CurrentPhase,
+		RequiresUserApproval: execution.RequiresUserApproval,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -397,9 +400,7 @@ func executeDomainExpert(taskID string, phase *ProjectPhase, expert *DomainExper
 }
 
 func checkPhaseCompletion(taskID string, phase *ProjectPhase) {
-	tasksMutex.Lock()
-	defer tasksMutex.Unlock()
-
+	// Check if all experts are completed
 	allCompleted := true
 	for _, expert := range phase.Experts {
 		if expert.Status != "completed" && expert.Status != "failed" {
@@ -409,245 +410,160 @@ func checkPhaseCompletion(taskID string, phase *ProjectPhase) {
 	}
 
 	if allCompleted {
+		tasksMutex.Lock()
+		defer tasksMutex.Unlock()
+
+		// Important: check the specific execution object
+		execution, exists := currentTasks[taskID]
+		if !exists {
+			return
+		}
+
 		phase.Status = "completed"
 		phase.EndTime = &[]time.Time{time.Now()}[0]
 
-		// Check if this phase requires user approval
-		execution := currentTasks[taskID]
-		if execution != nil && execution.RequiresUserApproval {
+		// This is the key logic for pausing
+		if execution.RequiresUserApproval {
 			phase.Status = "awaiting_approval"
-			log.Printf("⏳ [%s] Phase %s completed, awaiting user approval", taskID, phase.ID)
+			log.Printf("⏳ [%s] Phase '%s' completed. Awaiting user approval.", taskID, phase.Name)
 		} else {
-			// Auto-approve and continue
+			// Auto-approve if user approval is not required for this task
 			phase.Approved = true
 			phase.Status = "approved"
+			log.Printf("✅ [%s] Phase '%s' auto-approved.", taskID, phase.Name)
 			if execution.CurrentPhase < len(execution.Phases)-1 {
 				execution.CurrentPhase++
 				go startNextPhase(execution)
 			} else {
 				execution.Status = "completed"
-				log.Printf("🎉 [%s] All phases completed", taskID)
+				log.Printf("🎉 [%s] All phases completed.", taskID)
 			}
 		}
 	}
 }
 
 func executeTask(execution *TaskExecution) {
-	log.Printf("🚀 [%s] Starting task execution: %s", execution.ID, execution.Task[:min(100, len(execution.Task))])
-
-	// Update status to running
+	log.Printf("🚀 [%s] Starting task execution: %s", execution.ID, execution.Task)
 	tasksMutex.Lock()
-	execution.Status = "running"
-	execution.RequiresUserApproval = true // Enable phased execution with user approval
+	execution.Status = "planning"
+	execution.RequiresUserApproval = true // Ensure this is set for the phased model
 	tasksMutex.Unlock()
 
-	// First, use a lead agent to break down the task into phases with domain experts
-	if len(execution.Phases) == 0 {
-		log.Printf("📋 [%s] Breaking down task into phases with domain experts", execution.ID)
+	// Step 1: Use the Lead Agent to generate a phased plan.
+	err := generatePhasedPlan(execution)
+	if err != nil {
+		tasksMutex.Lock()
+		execution.Status = "failed"
+		execution.Error = err.Error()
+		tasksMutex.Unlock()
+		log.Printf("❌ [%s] Failed to generate phased plan: %v", execution.ID, err)
+		return
+	}
 
-		// Create a lead agent to analyze and break down the task
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
+	// Step 2: If a plan was generated successfully, start the first phase.
+	if len(execution.Phases) > 0 {
+		log.Printf("🎬 [%s] Phased plan generated. Starting first phase.", execution.ID)
+		startNextPhase(execution)
+	} else {
+		// Fallback for simple tasks that don't need phases.
+		log.Printf("🌳 [%s] No phases generated, executing as a single task.", execution.ID)
+		executeTaskWithTree(execution) // Keep the original logic as a fallback
+	}
+}
 
-		agentContainer, err := dockerManager.SpawnAgent(ctx)
-		if err != nil {
-			tasksMutex.Lock()
-			execution.Status = "failed"
-			execution.Error = fmt.Sprintf("Failed to spawn lead agent: %v", err)
-			tasksMutex.Unlock()
-			log.Printf("❌ [%s] Failed to spawn lead agent: %v", execution.ID, err)
-			return
-		}
+// MODIFICATION 2: Create a new function to generate the phased plan.
+func generatePhasedPlan(execution *TaskExecution) error {
+	log.Printf("📋 [%s] Generating phased project plan...", execution.ID)
 
-		defer func() {
-			log.Printf("🧹 [%s] Cleaning up lead agent container", execution.ID)
-			if err := dockerManager.StopAgent(ctx, agentContainer.ID); err != nil {
-				log.Printf("⚠️ Failed to cleanup lead agent container: %v", err)
-			}
-		}()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
 
-		// Task breakdown prompt for the lead agent - focused on getting valid JSON
-		breakdownTask := fmt.Sprintf(`You are a senior project manager. Break down this task into phases with domain experts.
+	agentContainer, err := dockerManager.SpawnAgent(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to spawn lead agent: %v", err)
+	}
+	defer dockerManager.CleanupAllAgents()
 
-TASK: %s
+	// This is the updated prompt for the Lead Agent to create phases.
+	planningPrompt := fmt.Sprintf(`
+You are a world-class AI Project Manager. Your job is to break down a complex user request into a sequence of logical PHASES.
 
-Your response MUST be ONLY this JSON format, no other text:
+**Constraint Checklist:**
+1.  **Phase 1 Restriction**: The first phase MUST NOT contain more than 10 domain experts.
+2.  **No Delegation in Phase 1**: The tasks for experts in the first phase must be self-contained. You must explicitly instruct them NOT to delegate further.
+3.  **Logical Progression**: Subsequent phases should build upon the results of the previous one (e.g., Phase 1: Planning, Phase 2: Implementation).
 
+**User Task:** "%s"
+
+**Your Output MUST be ONLY valid JSON in this exact format:**
 {
   "phases": [
     {
-      "id": "phase-1",
-      "name": "Requirements and Planning",
-      "description": "Analyze requirements and create detailed plans",
+      "id": "phase_1_planning",
+      "name": "Initial Design and Planning",
+      "description": "Define the architecture, requirements, and user experience.",
       "experts": [
         {
-          "role": "Business Analyst",
-          "expertise": "Requirements analysis and stakeholder management",
-          "persona": "Senior business analyst with 10+ years experience translating business needs into technical requirements",
-          "task": "Analyze the task requirements and define detailed functional specifications"
-        },
+          "role": "Lead Architect",
+          "expertise": "Overall system design and technology stack selection.",
+          "persona": "You are a Lead Architect. Your task is to produce a high-level system architecture document. **You must execute this task yourself and are not allowed to delegate it further.**",
+          "task": "Based on the user request, create a detailed technical architecture document, including diagrams and technology choices."
+        }
+      ]
+    },
+    {
+      "id": "phase_2_implementation",
+      "name": "Core Feature Implementation",
+      "description": "Develop the key components defined in the planning phase.",
+      "experts": [
         {
-          "role": "Technical Architect",
-          "expertise": "System architecture and technology selection",
-          "persona": "Expert system architect specializing in scalable, maintainable system design",
-          "task": "Define the technical architecture and technology stack recommendations"
-        },
-        {
-          "role": "UX Designer",
-          "expertise": "User experience design and interface planning",
-          "persona": "Lead UX designer with expertise in user-centered design and accessibility",
-          "task": "Create user experience framework and interface design guidelines"
+          "role": "Backend Developer",
+          "expertise": "API and database development.",
+          "persona": "You are a senior backend developer. You will receive design documents and must implement the corresponding API endpoints.",
+          "task": "Implement the core user authentication and profile management API endpoints according to the architecture document from Phase 1."
         }
       ]
     }
   ]
 }
+`, execution.Task)
 
-RULES:
-- Maximum 10 experts in phase 1
-- Each expert gets ONE specific task
-- Experts do NOT delegate further
-- Focus on planning/design before implementation
-- Return ONLY the JSON, nothing else`, execution.Task)
+	leadPersona := "You are a JSON response generator. You ONLY output valid JSON. You never include explanations, comments, or any text outside the JSON structure."
 
-		leadPersona := "You are a JSON response generator. You ONLY output valid JSON. You never include explanations, comments, or any text outside the JSON structure. You are expert at project planning and always return exactly the requested JSON format."
-
-		contextData := make(map[string]string)
-		result, err := tasks.ExecuteTaskOnAgent(agentContainer.Address, "lead-planner", leadPersona, breakdownTask, contextData)
-		if err != nil {
-			tasksMutex.Lock()
-			execution.Status = "failed"
-			execution.Error = fmt.Sprintf("Lead agent planning failed: %v", err)
-			tasksMutex.Unlock()
-			log.Printf("❌ [%s] Lead agent planning failed: %v", execution.ID, err)
-			return
-		}
-
-		if !result.Success {
-			tasksMutex.Lock()
-			execution.Status = "failed"
-			execution.Error = "Lead agent reported planning failure: " + result.ErrorMessage
-			tasksMutex.Unlock()
-			log.Printf("❌ [%s] Lead agent reported planning failure: %s", execution.ID, result.ErrorMessage)
-			return
-		}
-
-		// Parse the JSON response to extract phases
-		var planResponse struct {
-			Phases []struct {
-				ID          string `json:"id"`
-				Name        string `json:"name"`
-				Description string `json:"description"`
-				Experts     []struct {
-					Role      string `json:"role"`
-					Expertise string `json:"expertise"`
-					Persona   string `json:"persona"`
-					Task      string `json:"task"`
-				} `json:"experts"`
-			} `json:"phases"`
-		}
-
-		// Try to extract JSON from the response (in case agent included extra text)
-		content := strings.TrimSpace(result.FinalContent)
-		log.Printf("🔍 [%s] Raw planning response: '%s'", execution.ID, content[:min(300, len(content))])
-
-		// Clean the content - remove any markdown formatting
-		content = strings.TrimPrefix(content, "```json")
-		content = strings.TrimSuffix(content, "```")
-		content = strings.TrimSpace(content)
-
-		// Look for JSON object boundaries
-		startIdx := -1
-		endIdx := -1
-		braceCount := 0
-
-		for i, char := range content {
-			if char == '{' {
-				if startIdx == -1 {
-					startIdx = i
-				}
-				braceCount++
-			} else if char == '}' {
-				braceCount--
-				if braceCount == 0 && startIdx != -1 {
-					endIdx = i + 1
-					break
-				}
-			}
-		}
-
-		var jsonContent string
-		if startIdx != -1 && endIdx != -1 {
-			jsonContent = content[startIdx:endIdx]
-		} else if len(content) > 0 && content[0] == '{' {
-			// If starts with { but no complete object found, try the whole content
-			jsonContent = content
-		} else {
-			log.Printf("⚠️ [%s] No valid JSON structure found in response, falling back to tree execution", execution.ID)
-			log.Printf("🔍 [%s] Full response content: '%s'", execution.ID, content)
-			executeTaskWithTree(execution)
-			return
-		}
-
-		log.Printf("🔍 [%s] Attempting to parse JSON: %s", execution.ID, jsonContent[:min(200, len(jsonContent))])
-
-		if err := json.Unmarshal([]byte(jsonContent), &planResponse); err != nil {
-			log.Printf("⚠️ [%s] Failed to parse JSON, falling back to tree execution: %v", execution.ID, err)
-			log.Printf("🔍 [%s] JSON content was: %s", execution.ID, jsonContent)
-			executeTaskWithTree(execution)
-			return
-		}
-
-		// Validate the response structure
-		if len(planResponse.Phases) == 0 {
-			log.Printf("⚠️ [%s] No phases in response, falling back to tree execution", execution.ID)
-			executeTaskWithTree(execution)
-			return
-		}
-
-		// Convert to our phase structure
-		tasksMutex.Lock()
-		execution.Phases = make([]ProjectPhase, len(planResponse.Phases))
-		for i, phase := range planResponse.Phases {
-			execution.Phases[i] = ProjectPhase{
-				ID:          phase.ID,
-				Name:        phase.Name,
-				Description: phase.Description,
-				Status:      "pending",
-				Results:     make(map[string]string),
-			}
-
-			// Convert experts
-			execution.Phases[i].Experts = make([]DomainExpert, len(phase.Experts))
-			for j, expert := range phase.Experts {
-				execution.Phases[i].Experts[j] = DomainExpert{
-					Role:      expert.Role,
-					Expertise: expert.Expertise,
-					Persona:   expert.Persona,
-					Task:      expert.Task,
-					Status:    "pending",
-				}
-			}
-		}
-		execution.CurrentPhase = 0
-		tasksMutex.Unlock()
-
-		log.Printf("✅ [%s] Task broken down into %d phases", execution.ID, len(execution.Phases))
-		for i, phase := range execution.Phases {
-			log.Printf("📋 [%s] Phase %d: %s (%d experts)", execution.ID, i+1, phase.Name, len(phase.Experts))
-		}
+	result, err := tasks.ExecuteTaskOnAgent(agentContainer.Address, execution.ID+"-planner", leadPersona, planningPrompt, nil)
+	if err != nil || !result.Success {
+		return fmt.Errorf("lead agent failed to generate a plan. Error: %v, Agent Message: %s", err, result.GetErrorMessage())
 	}
 
-	// Start execution of the first phase
-	if len(execution.Phases) > 0 {
-		log.Printf("🎬 [%s] Starting phased execution", execution.ID)
-		startNextPhase(execution)
-	} else {
-		log.Printf("⚠️ [%s] No phases created, falling back to tree execution", execution.ID)
-		executeTaskWithTree(execution)
+	// Unmarshal the phased plan from the agent's response
+	var planResponse struct {
+		Phases []ProjectPhase `json:"phases"`
 	}
+	// Sanitize the response to ensure it's valid JSON
+	jsonContent := strings.TrimSpace(result.FinalContent)
+	if strings.HasPrefix(jsonContent, "```json") {
+		jsonContent = strings.TrimPrefix(jsonContent, "```json")
+		jsonContent = strings.TrimSuffix(jsonContent, "```")
+		jsonContent = strings.TrimSpace(jsonContent)
+	}
+
+	if err := json.Unmarshal([]byte(jsonContent), &planResponse); err != nil {
+		return fmt.Errorf("failed to parse phased plan from lead agent: %v. Raw content: %s", err, jsonContent)
+	}
+
+	if len(planResponse.Phases) == 0 {
+		return fmt.Errorf("lead agent returned a plan with no phases")
+	}
+
+	// Update the execution object with the new plan
+	tasksMutex.Lock()
+	execution.Phases = planResponse.Phases
+	execution.CurrentPhase = 0
+	tasksMutex.Unlock()
+
+	log.Printf("✅ [%s] Successfully generated a plan with %d phases.", execution.ID, len(execution.Phases))
+	return nil
 }
-
 func executeTaskWithTree(execution *TaskExecution) {
 	log.Printf("🌳 [%s] Using tree-based execution", execution.ID)
 
