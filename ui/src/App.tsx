@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Clock } from 'lucide-react'
 import { TaskInput } from './components/TaskInput'
 import { TaskResult } from './components/TaskResult'
@@ -45,6 +45,182 @@ function App() {
   const [tasks, setTasks] = useState<Task[]>([])
   const [currentTask, setCurrentTask] = useState<Task | null>(null)
   const [isLoading, setIsLoading] = useState(false)
+  const [isConnected, setIsConnected] = useState(false)
+  const wsRef = useRef<WebSocket | null>(null)
+
+  // Load tasks from localStorage on component mount
+  useEffect(() => {
+    const savedTasks = localStorage.getItem('agent_inc_tasks')
+    const savedCurrentTaskId = localStorage.getItem('agent_inc_current_task')
+    
+    if (savedTasks) {
+      try {
+        const parsedTasks = JSON.parse(savedTasks).map((task: any) => ({
+          ...task,
+          timestamp: new Date(task.timestamp)
+        }))
+        setTasks(parsedTasks)
+        
+        if (savedCurrentTaskId) {
+          const currentTask = parsedTasks.find((task: Task) => task.id === savedCurrentTaskId)
+          if (currentTask) {
+            setCurrentTask(currentTask)
+            // Fetch latest status for the current task
+            fetchTaskStatus(currentTask.orchestratorId || currentTask.id)
+          }
+        }
+      } catch (error) {
+        console.error('Failed to load tasks from localStorage:', error)
+      }
+    }
+  }, [])
+
+  // Save tasks to localStorage whenever tasks change
+  useEffect(() => {
+    localStorage.setItem('agent_inc_tasks', JSON.stringify(tasks))
+  }, [tasks])
+
+  // Save current task ID to localStorage whenever it changes
+  useEffect(() => {
+    if (currentTask) {
+      localStorage.setItem('agent_inc_current_task', currentTask.id)
+    } else {
+      localStorage.removeItem('agent_inc_current_task')
+    }
+  }, [currentTask])
+
+  // WebSocket connection and message handling
+  useEffect(() => {
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const wsUrl = `${wsProtocol}//${window.location.host}/ws`
+    
+    const connect = () => {
+      wsRef.current = new WebSocket(wsUrl)
+      
+      wsRef.current.onopen = () => {
+        console.log('WebSocket connected')
+        setIsConnected(true)
+      }
+      
+      wsRef.current.onclose = () => {
+        console.log('WebSocket disconnected')
+        setIsConnected(false)
+        // Attempt to reconnect after 3 seconds
+        setTimeout(connect, 3000)
+      }
+      
+      wsRef.current.onerror = (error) => {
+        console.error('WebSocket error:', error)
+      }
+      
+      wsRef.current.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data)
+          handleWebSocketMessage(message)
+        } catch (error) {
+          console.error('Failed to parse WebSocket message:', error)
+        }
+      }
+    }
+    
+    connect()
+    
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close()
+      }
+    }
+  }, [])
+
+  const handleWebSocketMessage = (message: any) => {
+    const { type, taskId } = message
+    
+    switch (type) {
+      case 'task_created':
+      case 'task_status_updated':
+      case 'plan_generated':
+      case 'phase_started':
+      case 'phase_completed':
+      case 'phase_awaiting_approval':
+      case 'phase_approved':
+      case 'phase_rejected':
+      case 'expert_started':
+      case 'expert_completed':
+      case 'expert_failed':
+      case 'task_completed':
+        // Update the specific task in our state
+        updateTaskFromWebSocket(taskId)
+        break
+      default:
+        console.log('Unknown WebSocket message type:', type)
+    }
+  }
+
+  const updateTaskFromWebSocket = async (taskId: string) => {
+    // Fetch the latest task status from the API
+    try {
+      const response = await fetch(`http://localhost:8080/api/task/${taskId}`)
+      if (response.ok) {
+        const updatedTask = await response.json()
+        
+        setTasks(prev => prev.map(task => {
+          if (task.orchestratorId === taskId || task.id === taskId) {
+            const updated = {
+              ...task,
+              status: updatedTask.status,
+              result: updatedTask.result,
+              error: updatedTask.error,
+              phases: updatedTask.phases,
+              currentPhase: updatedTask.currentPhase,
+              requiresUserApproval: updatedTask.requiresUserApproval
+            }
+            
+            // Update current task if it's the one being updated
+            if (currentTask && (currentTask.orchestratorId === taskId || currentTask.id === taskId)) {
+              setCurrentTask(updated)
+            }
+            
+            return updated
+          }
+          return task
+        }))
+      }
+    } catch (error) {
+      console.error('Failed to fetch updated task status:', error)
+    }
+  }
+
+  const fetchTaskStatus = async (taskId: string) => {
+    try {
+      const response = await fetch(`http://localhost:8080/api/task/${taskId}`)
+      if (response.ok) {
+        const taskStatus = await response.json()
+        
+        setTasks(prev => prev.map(task => {
+          if (task.orchestratorId === taskId || task.id === taskId) {
+            const updated = {
+              ...task,
+              status: taskStatus.status,
+              result: taskStatus.result,
+              error: taskStatus.error,
+              phases: taskStatus.phases,
+              currentPhase: taskStatus.currentPhase,
+              requiresUserApproval: taskStatus.requiresUserApproval
+            }
+            
+            if (currentTask && (currentTask.orchestratorId === taskId || currentTask.id === taskId)) {
+              setCurrentTask(updated)
+            }
+            
+            return updated
+          }
+          return task
+        }))
+      }
+    } catch (error) {
+      console.error('Failed to fetch task status:', error)
+    }
+  }
 
   const submitTask = async (description: string) => {
     const newTask: Task = {
@@ -84,56 +260,8 @@ function App() {
       setTasks(prev => prev.map(t => t.id === newTask.id ? runningTask : t))
       setCurrentTask(runningTask)
 
-      // Start polling for task completion
-      const pollForResult = async () => {
-        while (true) {
-          try {
-            const statusResponse = await fetch(`http://localhost:8080/api/task/${orchestratorTaskId}`)
-            if (!statusResponse.ok) {
-              throw new Error(`Failed to get task status: ${statusResponse.status}`)
-            }
-
-            const taskStatus = await statusResponse.json()
-            
-            // Update task with phase information
-            const updatedTask = { 
-              ...runningTask, 
-              status: taskStatus.status,
-              result: taskStatus.result,
-              error: taskStatus.error,
-              phases: taskStatus.phases,
-              currentPhase: taskStatus.currentPhase,
-              requiresUserApproval: taskStatus.requiresUserApproval
-            }
-            
-            if (taskStatus.status === 'completed') {
-              const completedTask = { ...updatedTask, status: 'completed' as const }
-              setTasks(prev => prev.map(t => t.id === newTask.id ? completedTask : t))
-              setCurrentTask(completedTask)
-              break
-            } else if (taskStatus.status === 'error' || taskStatus.status === 'failed') {
-              const errorTask = { ...updatedTask, status: 'error' as const }
-              setTasks(prev => prev.map(t => t.id === newTask.id ? errorTask : t))
-              setCurrentTask(errorTask)
-              break
-            } else {
-              // Update task with current status and phase info
-              setTasks(prev => prev.map(t => t.id === newTask.id ? updatedTask : t))
-              setCurrentTask(updatedTask)
-            }
-            
-            // Wait 2 seconds before polling again
-            await new Promise(resolve => setTimeout(resolve, 2000))
-          } catch (pollError) {
-            console.error('Polling error:', pollError)
-            // Continue polling unless it's a critical error
-            await new Promise(resolve => setTimeout(resolve, 5000))
-          }
-        }
-      }
-
-      // Start polling in background
-      pollForResult()
+      console.log(`Task submitted successfully. Orchestrator ID: ${orchestratorTaskId}`)
+      console.log('WebSocket will handle real-time updates')
 
     } catch (error) {
       const errorTask = { 
@@ -207,6 +335,15 @@ function App() {
     <div className="min-h-screen animated-bg">
       <Header />
       
+      {/* WebSocket Status Indicator */}
+      <div className={`fixed top-4 right-4 px-3 py-1 rounded-full text-sm font-medium z-50 ${
+        isConnected 
+          ? 'bg-green-500 text-white' 
+          : 'bg-red-500 text-white animate-pulse'
+      }`}>
+        {isConnected ? '🟢 Live' : '🔴 Disconnected'}
+      </div>
+      
       <main className="container mx-auto px-8 py-12 max-w-6xl">
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-12">
           {/* Left Column - Task Input - Takes 3/5 of width */}
@@ -243,9 +380,8 @@ function App() {
                         task.status === 'error' ? 'activity-error' :
                         task.status === 'running' ? 'activity-info' :
                         'activity-warning'
-                      }`}
+                      } ${currentTask?.id === task.id ? 'ring-2 ring-blue-400' : ''}`}
                       onClick={() => setCurrentTask(task)}
-                      /* Animation delay removed */
                     >
                       <div className="flex items-center justify-between mb-3">
                         <p className="font-bold text-gray-800 text-xl truncate flex-1 mr-6">
@@ -260,9 +396,16 @@ function App() {
                           {task.status.toUpperCase()}
                         </div>
                       </div>
-                      <p className="text-base text-gray-600 font-medium">
-                        {task.timestamp.toLocaleString()}
-                      </p>
+                      <div className="flex items-center justify-between">
+                        <p className="text-base text-gray-600 font-medium">
+                          {task.timestamp.toLocaleString()}
+                        </p>
+                        {task.phases && task.phases.length > 0 && (
+                          <p className="text-sm text-gray-500">
+                            Phase {(task.currentPhase || 0) + 1} of {task.phases.length}
+                          </p>
+                        )}
+                      </div>
                     </div>
                   ))
                 )}

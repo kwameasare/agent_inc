@@ -11,9 +11,11 @@ import (
 	"sync"
 	"time"
 
+	"agentic-engineering-system/database"
 	"agentic-engineering-system/docker"
 	"agentic-engineering-system/tasks"
 	"agentic-engineering-system/tasktree"
+	"agentic-engineering-system/websocket"
 )
 
 // Global state for the orchestrator
@@ -21,6 +23,8 @@ var (
 	dockerManager *docker.Manager
 	currentTasks  = make(map[string]*TaskExecution)
 	tasksMutex    sync.RWMutex
+	db            *database.DB
+	wsHub         *websocket.Hub
 )
 
 type TaskExecution struct {
@@ -37,6 +41,8 @@ type TaskExecution struct {
 	Phases               []ProjectPhase     `json:"phases,omitempty"`
 	CurrentPhase         int                `json:"currentPhase"`
 	RequiresUserApproval bool               `json:"requiresUserApproval"`
+	CreatedAt            time.Time          `json:"createdAt"`
+	UpdatedAt            time.Time          `json:"updatedAt"`
 }
 
 type ProjectPhase struct {
@@ -83,9 +89,30 @@ func main() {
 		log.Fatal("OPENAI_API_KEY environment variable is required")
 	}
 
+	// Initialize database
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = "postgres://localhost/agent_inc?sslmode=disable"
+		log.Printf("Using default database URL: %s", databaseURL)
+	}
+
+	var err error
+	db, err = database.NewDB(databaseURL)
+	if err != nil {
+		log.Printf("Warning: Database connection failed (%v), falling back to in-memory storage", err)
+		db = nil
+	} else {
+		log.Printf("✅ Database connected successfully")
+		// Load existing tasks from database
+		loadTasksFromDB()
+	}
+
+	// Initialize WebSocket hub
+	wsHub = websocket.NewHub()
+	go wsHub.Run()
+
 	// Initialize Docker manager
 	ctx := context.Background()
-	var err error
 	dockerManager, err = docker.NewManager(ctx)
 	if err != nil {
 		log.Fatalf("Failed to create docker manager: %v", err)
@@ -96,6 +123,8 @@ func main() {
 	http.HandleFunc("/api/task", enableCORS(handleTask))
 	http.HandleFunc("/api/task/", enableCORS(handleTaskStatus))
 	http.HandleFunc("/api/phases/approve", enableCORS(handlePhaseApproval))
+	http.HandleFunc("/api/phase/", enableCORS(handlePhaseResults))
+	http.HandleFunc("/ws", wsHub.HandleWebSocket)
 	http.HandleFunc("/health", handleHealth)
 
 	// Serve static files for the UI
@@ -108,11 +137,134 @@ func main() {
 	log.Println("📊 API endpoints:")
 	log.Println("   POST /api/task - Submit new task")
 	log.Println("   GET  /api/task/{id} - Get task status")
+	log.Println("   GET  /api/phase/{taskId}/{phaseId} - Get phase results")
+	log.Println("   POST /api/phases/approve - Approve/reject phase")
+	log.Println("   WS   /ws - WebSocket for real-time updates")
 	log.Println("   GET  /health - Health check")
 
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		log.Fatalf("Server failed to start: %v", err)
 	}
+}
+
+func loadTasksFromDB() {
+	if db == nil {
+		return
+	}
+
+	tasks, err := db.GetAllTasks()
+	if err != nil {
+		log.Printf("Warning: Failed to load tasks from database: %v", err)
+		return
+	}
+
+	tasksMutex.Lock()
+	defer tasksMutex.Unlock()
+
+	for _, task := range tasks {
+		// Convert database.TaskExecution to main.TaskExecution
+		execution := &TaskExecution{
+			ID:                   task.ID,
+			Task:                 task.Task,
+			Status:               task.Status,
+			Result:               task.Result,
+			Error:                task.Error,
+			Started:              task.Started,
+			Phases:               convertPhases(task.Phases),
+			CurrentPhase:         task.CurrentPhase,
+			RequiresUserApproval: task.RequiresUserApproval,
+			CreatedAt:            task.CreatedAt,
+			UpdatedAt:            task.UpdatedAt,
+		}
+		currentTasks[task.ID] = execution
+	}
+
+	log.Printf("✅ Loaded %d tasks from database", len(tasks))
+}
+
+func convertPhases(dbPhases []database.ProjectPhase) []ProjectPhase {
+	phases := make([]ProjectPhase, len(dbPhases))
+	for i, dbPhase := range dbPhases {
+		experts := make([]DomainExpert, len(dbPhase.Experts))
+		for j, dbExpert := range dbPhase.Experts {
+			experts[j] = DomainExpert{
+				Role:      dbExpert.Role,
+				Expertise: dbExpert.Expertise,
+				Persona:   dbExpert.Persona,
+				Task:      dbExpert.Task,
+				Status:    dbExpert.Status,
+				Result:    dbExpert.Result,
+			}
+		}
+		phases[i] = ProjectPhase{
+			ID:           dbPhase.ID,
+			Name:         dbPhase.Name,
+			Description:  dbPhase.Description,
+			Status:       dbPhase.Status,
+			Experts:      experts,
+			Results:      dbPhase.Results,
+			StartTime:    dbPhase.StartTime,
+			EndTime:      dbPhase.EndTime,
+			Approved:     dbPhase.Approved,
+			UserFeedback: dbPhase.UserFeedback,
+		}
+	}
+	return phases
+}
+
+func saveTaskToDB(task *TaskExecution) {
+	if db == nil {
+		return
+	}
+
+	// Convert main.TaskExecution to database.TaskExecution
+	dbTask := &database.TaskExecution{
+		ID:                   task.ID,
+		Task:                 task.Task,
+		Status:               task.Status,
+		Result:               task.Result,
+		Error:                task.Error,
+		Started:              task.Started,
+		Phases:               convertPhasesToDB(task.Phases),
+		CurrentPhase:         task.CurrentPhase,
+		RequiresUserApproval: task.RequiresUserApproval,
+		CreatedAt:            task.CreatedAt,
+		UpdatedAt:            task.UpdatedAt,
+	}
+
+	if err := db.SaveTask(dbTask); err != nil {
+		log.Printf("Warning: Failed to save task to database: %v", err)
+	}
+}
+
+func convertPhasesToDB(phases []ProjectPhase) []database.ProjectPhase {
+	dbPhases := make([]database.ProjectPhase, len(phases))
+	for i, phase := range phases {
+		dbExperts := make([]database.DomainExpert, len(phase.Experts))
+		for j, expert := range phase.Experts {
+			dbExperts[j] = database.DomainExpert{
+				Role:      expert.Role,
+				Expertise: expert.Expertise,
+				Persona:   expert.Persona,
+				Task:      expert.Task,
+				Status:    expert.Status,
+				Result:    expert.Result,
+			}
+		}
+		dbPhases[i] = database.ProjectPhase{
+			ID:           phase.ID,
+			Name:         phase.Name,
+			Description:  phase.Description,
+			Status:       phase.Status,
+			Experts:      dbExperts,
+			Results:      phase.Results,
+			StartTime:    phase.StartTime,
+			EndTime:      phase.EndTime,
+			Approved:     phase.Approved,
+			UserFeedback: phase.UserFeedback,
+		}
+	}
+	return dbPhases
 }
 
 func enableCORS(handler http.HandlerFunc) http.HandlerFunc {
@@ -148,18 +300,30 @@ func handleTask(w http.ResponseWriter, r *http.Request) {
 		taskID := fmt.Sprintf("task_%d", time.Now().Unix())
 		ctx, cancel := context.WithCancel(context.Background())
 
+		now := time.Now()
 		execution := &TaskExecution{
-			ID:      taskID,
-			Task:    req.Task,
-			Status:  "pending",
-			Started: time.Now(),
-			Context: ctx,
-			Cancel:  cancel,
+			ID:                   taskID,
+			Task:                 req.Task,
+			Status:               "pending",
+			Started:              now,
+			Context:              ctx,
+			Cancel:               cancel,
+			RequiresUserApproval: true,
+			CreatedAt:            now,
+			UpdatedAt:            now,
 		}
 
 		tasksMutex.Lock()
 		currentTasks[taskID] = execution
 		tasksMutex.Unlock()
+
+		// Save to database
+		saveTaskToDB(execution)
+
+		// Broadcast task creation via WebSocket
+		if wsHub != nil {
+			wsHub.BroadcastMessage("task_created", execution, taskID, "")
+		}
 
 		// Start task execution in background
 		go executeTask(execution)
@@ -178,12 +342,17 @@ func handleTask(w http.ResponseWriter, r *http.Request) {
 		for _, task := range currentTasks {
 			// Create a copy without context
 			taskCopy := TaskExecution{
-				ID:      task.ID,
-				Task:    task.Task,
-				Status:  task.Status,
-				Result:  task.Result,
-				Error:   task.Error,
-				Started: task.Started,
+				ID:                   task.ID,
+				Task:                 task.Task,
+				Status:               task.Status,
+				Result:               task.Result,
+				Error:                task.Error,
+				Started:              task.Started,
+				Phases:               task.Phases,
+				CurrentPhase:         task.CurrentPhase,
+				RequiresUserApproval: task.RequiresUserApproval,
+				CreatedAt:            task.CreatedAt,
+				UpdatedAt:            task.UpdatedAt,
 			}
 			tasks = append(tasks, taskCopy)
 		}
@@ -215,8 +384,38 @@ func handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 	tasksMutex.RUnlock()
 
 	if !exists {
-		http.Error(w, "Task not found", http.StatusNotFound)
-		return
+		// Try to load from database if not in memory
+		if db != nil {
+			dbTask, err := db.GetTask(taskID)
+			if err != nil {
+				http.Error(w, "Database error", http.StatusInternalServerError)
+				return
+			}
+			if dbTask != nil {
+				// Convert and cache in memory
+				execution = &TaskExecution{
+					ID:                   dbTask.ID,
+					Task:                 dbTask.Task,
+					Status:               dbTask.Status,
+					Result:               dbTask.Result,
+					Error:                dbTask.Error,
+					Started:              dbTask.Started,
+					Phases:               convertPhases(dbTask.Phases),
+					CurrentPhase:         dbTask.CurrentPhase,
+					RequiresUserApproval: dbTask.RequiresUserApproval,
+					CreatedAt:            dbTask.CreatedAt,
+					UpdatedAt:            dbTask.UpdatedAt,
+				}
+				tasksMutex.Lock()
+				currentTasks[taskID] = execution
+				tasksMutex.Unlock()
+			}
+		}
+
+		if execution == nil {
+			http.Error(w, "Task not found", http.StatusNotFound)
+			return
+		}
 	}
 
 	// Create response without context
@@ -230,6 +429,68 @@ func handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 		Phases:               execution.Phases,
 		CurrentPhase:         execution.CurrentPhase,
 		RequiresUserApproval: execution.RequiresUserApproval,
+		CreatedAt:            execution.CreatedAt,
+		UpdatedAt:            execution.UpdatedAt,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func handlePhaseResults(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract task ID and phase ID from URL path: /api/phase/{taskId}/{phaseId}
+	path := r.URL.Path[len("/api/phase/"):]
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 {
+		http.Error(w, "Invalid URL format. Use /api/phase/{taskId}/{phaseId}", http.StatusBadRequest)
+		return
+	}
+
+	taskID := parts[0]
+	phaseID := parts[1]
+
+	tasksMutex.RLock()
+	execution, exists := currentTasks[taskID]
+	tasksMutex.RUnlock()
+
+	if !exists {
+		http.Error(w, "Task not found", http.StatusNotFound)
+		return
+	}
+
+	// Find the phase
+	var phase *ProjectPhase
+	for i := range execution.Phases {
+		if execution.Phases[i].ID == phaseID {
+			phase = &execution.Phases[i]
+			break
+		}
+	}
+
+	if phase == nil {
+		http.Error(w, "Phase not found", http.StatusNotFound)
+		return
+	}
+
+	// Get detailed results for each expert in the phase
+	detailedResults := make(map[string]interface{})
+	for _, expert := range phase.Experts {
+		detailedResults[expert.Role] = map[string]interface{}{
+			"expertise": expert.Expertise,
+			"task":      expert.Task,
+			"status":    expert.Status,
+			"result":    expert.Result,
+		}
+	}
+
+	response := map[string]interface{}{
+		"phase":           phase,
+		"detailedResults": detailedResults,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -245,6 +506,32 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(health)
+}
+
+func updateTaskStatus(execution *TaskExecution, status string, result, error string) {
+	tasksMutex.Lock()
+	execution.Status = status
+	execution.UpdatedAt = time.Now()
+	if result != "" {
+		execution.Result = result
+	}
+	if error != "" {
+		execution.Error = error
+	}
+	tasksMutex.Unlock()
+
+	// Save to database
+	saveTaskToDB(execution)
+
+	// Broadcast status update via WebSocket
+	if wsHub != nil {
+		wsHub.BroadcastMessage("task_status_updated", map[string]interface{}{
+			"id":     execution.ID,
+			"status": status,
+			"result": result,
+			"error":  error,
+		}, execution.ID, "")
+	}
 }
 
 func handlePhaseApproval(w http.ResponseWriter, r *http.Request) {
@@ -286,10 +573,20 @@ func handlePhaseApproval(w http.ResponseWriter, r *http.Request) {
 	// Update phase approval status
 	phase.Approved = req.Approved
 	phase.UserFeedback = req.UserFeedback
+	execution.UpdatedAt = time.Now()
 
 	if req.Approved {
 		phase.Status = "approved"
 		log.Printf("✅ [%s] Phase %s approved by user", req.TaskID, req.PhaseID)
+
+		// Broadcast phase approval via WebSocket
+		if wsHub != nil {
+			wsHub.BroadcastMessage("phase_approved", map[string]interface{}{
+				"taskId":  req.TaskID,
+				"phaseId": req.PhaseID,
+				"phase":   phase,
+			}, req.TaskID, req.PhaseID)
+		}
 
 		// Continue with the next phase if there is one
 		if execution.CurrentPhase < len(execution.Phases)-1 {
@@ -298,15 +595,33 @@ func handlePhaseApproval(w http.ResponseWriter, r *http.Request) {
 		} else {
 			execution.Status = "completed"
 			log.Printf("🎉 [%s] All phases completed", req.TaskID)
+
+			// Broadcast task completion
+			if wsHub != nil {
+				wsHub.BroadcastMessage("task_completed", execution, req.TaskID, "")
+			}
 		}
 	} else {
 		phase.Status = "rejected"
 		execution.Status = "failed"
 		execution.Error = "Phase rejected by user: " + req.UserFeedback
 		log.Printf("❌ [%s] Phase %s rejected by user: %s", req.TaskID, req.PhaseID, req.UserFeedback)
+
+		// Broadcast phase rejection via WebSocket
+		if wsHub != nil {
+			wsHub.BroadcastMessage("phase_rejected", map[string]interface{}{
+				"taskId":  req.TaskID,
+				"phaseId": req.PhaseID,
+				"phase":   phase,
+				"reason":  req.UserFeedback,
+			}, req.TaskID, req.PhaseID)
+		}
 	}
 
 	tasksMutex.Unlock()
+
+	// Save to database
+	saveTaskToDB(execution)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -328,8 +643,20 @@ func startNextPhase(execution *TaskExecution) {
 	currentPhase := &execution.Phases[execution.CurrentPhase]
 	currentPhase.Status = "running"
 	currentPhase.StartTime = &[]time.Time{time.Now()}[0]
+	execution.UpdatedAt = time.Now()
 
 	log.Printf("🚀 [%s] Starting phase %d: %s", execution.ID, execution.CurrentPhase+1, currentPhase.Name)
+
+	// Save to database
+	saveTaskToDB(execution)
+
+	// Broadcast phase start via WebSocket
+	if wsHub != nil {
+		wsHub.BroadcastMessage("phase_started", map[string]interface{}{
+			"taskId": execution.ID,
+			"phase":  currentPhase,
+		}, execution.ID, currentPhase.ID)
+	}
 
 	// Execute the domain experts in this phase
 	for i := range currentPhase.Experts {
@@ -342,6 +669,15 @@ func executeDomainExpert(taskID string, phase *ProjectPhase, expert *DomainExper
 
 	expert.Status = "running"
 
+	// Broadcast expert start via WebSocket
+	if wsHub != nil {
+		wsHub.BroadcastMessage("expert_started", map[string]interface{}{
+			"taskId":  taskID,
+			"phaseId": phase.ID,
+			"expert":  expert,
+		}, taskID, phase.ID)
+	}
+
 	// Create agent container
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
@@ -351,6 +687,16 @@ func executeDomainExpert(taskID string, phase *ProjectPhase, expert *DomainExper
 		expert.Status = "failed"
 		expert.Result = fmt.Sprintf("Error spawning agent: %v", err)
 		log.Printf("❌ [%s] Failed to spawn agent for domain expert %s: %v", taskID, expert.Role, err)
+
+		// Broadcast expert failure
+		if wsHub != nil {
+			wsHub.BroadcastMessage("expert_failed", map[string]interface{}{
+				"taskId":  taskID,
+				"phaseId": phase.ID,
+				"expert":  expert,
+				"error":   err.Error(),
+			}, taskID, phase.ID)
+		}
 		return
 	}
 
@@ -371,6 +717,16 @@ func executeDomainExpert(taskID string, phase *ProjectPhase, expert *DomainExper
 		expert.Status = "failed"
 		expert.Result = fmt.Sprintf("Error: %v", err)
 		log.Printf("❌ [%s] Domain expert %s failed: %v", taskID, expert.Role, err)
+
+		// Broadcast expert failure
+		if wsHub != nil {
+			wsHub.BroadcastMessage("expert_failed", map[string]interface{}{
+				"taskId":  taskID,
+				"phaseId": phase.ID,
+				"expert":  expert,
+				"error":   err.Error(),
+			}, taskID, phase.ID)
+		}
 		return
 	}
 
@@ -379,6 +735,16 @@ func executeDomainExpert(taskID string, phase *ProjectPhase, expert *DomainExper
 		expert.Status = "failed"
 		expert.Result = "AGENT ERROR: " + result.ErrorMessage
 		log.Printf("❌ [%s] Domain expert %s reported failure: %s", taskID, expert.Role, result.ErrorMessage)
+
+		// Broadcast expert failure
+		if wsHub != nil {
+			wsHub.BroadcastMessage("expert_failed", map[string]interface{}{
+				"taskId":  taskID,
+				"phaseId": phase.ID,
+				"expert":  expert,
+				"error":   result.ErrorMessage,
+			}, taskID, phase.ID)
+		}
 		return
 	}
 
@@ -391,9 +757,24 @@ func executeDomainExpert(taskID string, phase *ProjectPhase, expert *DomainExper
 		phase.Results = make(map[string]string)
 	}
 	phase.Results[expert.Role] = result.FinalContent
+
+	// Save to database
+	if db != nil {
+		db.SavePhaseResult(taskID, phase.ID, expert.Role, result.FinalContent)
+	}
+
 	tasksMutex.Unlock()
 
 	log.Printf("✅ [%s] Domain expert %s completed", taskID, expert.Role)
+
+	// Broadcast expert completion via WebSocket
+	if wsHub != nil {
+		wsHub.BroadcastMessage("expert_completed", map[string]interface{}{
+			"taskId":  taskID,
+			"phaseId": phase.ID,
+			"expert":  expert,
+		}, taskID, phase.ID)
+	}
 
 	// Check if all experts in this phase are done
 	checkPhaseCompletion(taskID, phase)
@@ -421,11 +802,31 @@ func checkPhaseCompletion(taskID string, phase *ProjectPhase) {
 
 		phase.Status = "completed"
 		phase.EndTime = &[]time.Time{time.Now()}[0]
+		execution.UpdatedAt = time.Now()
+
+		// Save to database
+		saveTaskToDB(execution)
+
+		// Broadcast phase completion via WebSocket
+		if wsHub != nil {
+			wsHub.BroadcastMessage("phase_completed", map[string]interface{}{
+				"taskId": taskID,
+				"phase":  phase,
+			}, taskID, phase.ID)
+		}
 
 		// This is the key logic for pausing
 		if execution.RequiresUserApproval {
 			phase.Status = "awaiting_approval"
 			log.Printf("⏳ [%s] Phase '%s' completed. Awaiting user approval.", taskID, phase.Name)
+
+			// Broadcast awaiting approval via WebSocket
+			if wsHub != nil {
+				wsHub.BroadcastMessage("phase_awaiting_approval", map[string]interface{}{
+					"taskId": taskID,
+					"phase":  phase,
+				}, taskID, phase.ID)
+			}
 		} else {
 			// Auto-approve if user approval is not required for this task
 			phase.Approved = true
@@ -437,6 +838,11 @@ func checkPhaseCompletion(taskID string, phase *ProjectPhase) {
 			} else {
 				execution.Status = "completed"
 				log.Printf("🎉 [%s] All phases completed.", taskID)
+
+				// Broadcast task completion
+				if wsHub != nil {
+					wsHub.BroadcastMessage("task_completed", execution, taskID, "")
+				}
 			}
 		}
 	}
@@ -444,18 +850,13 @@ func checkPhaseCompletion(taskID string, phase *ProjectPhase) {
 
 func executeTask(execution *TaskExecution) {
 	log.Printf("🚀 [%s] Starting task execution: %s", execution.ID, execution.Task)
-	tasksMutex.Lock()
-	execution.Status = "planning"
-	execution.RequiresUserApproval = true // Ensure this is set for the phased model
-	tasksMutex.Unlock()
+
+	updateTaskStatus(execution, "planning", "", "")
 
 	// Step 1: Use the Lead Agent to generate a phased plan.
 	err := generatePhasedPlan(execution)
 	if err != nil {
-		tasksMutex.Lock()
-		execution.Status = "failed"
-		execution.Error = err.Error()
-		tasksMutex.Unlock()
+		updateTaskStatus(execution, "failed", "", err.Error())
 		log.Printf("❌ [%s] Failed to generate phased plan: %v", execution.ID, err)
 		return
 	}
@@ -463,6 +864,15 @@ func executeTask(execution *TaskExecution) {
 	// Step 2: If a plan was generated successfully, start the first phase.
 	if len(execution.Phases) > 0 {
 		log.Printf("🎬 [%s] Phased plan generated. Starting first phase.", execution.ID)
+
+		// Broadcast plan generation completion
+		if wsHub != nil {
+			wsHub.BroadcastMessage("plan_generated", map[string]interface{}{
+				"taskId": execution.ID,
+				"phases": execution.Phases,
+			}, execution.ID, "")
+		}
+
 		startNextPhase(execution)
 	} else {
 		// Fallback for simple tasks that don't need phases.
@@ -559,7 +969,11 @@ You are a world-class AI Project Manager. Your job is to break down a complex us
 	tasksMutex.Lock()
 	execution.Phases = planResponse.Phases
 	execution.CurrentPhase = 0
+	execution.UpdatedAt = time.Now()
 	tasksMutex.Unlock()
+
+	// Save to database
+	saveTaskToDB(execution)
 
 	log.Printf("✅ [%s] Successfully generated a plan with %d phases.", execution.ID, len(execution.Phases))
 	return nil

@@ -1,6 +1,7 @@
-import { CheckCircle, XCircle, Clock, Loader2, FileText, AlertTriangle, Users, CheckCircle2, Pause } from 'lucide-react'
+import { CheckCircle, XCircle, Clock, Loader2, FileText, AlertTriangle, Users, CheckCircle2, Pause, Eye } from 'lucide-react'
 import { useState } from 'react'
 import type { Task } from '../App'
+import { ExpertResultsModal } from './ExpertResultsModal'
 
 interface TaskResultProps {
   task: Task | null
@@ -9,6 +10,35 @@ interface TaskResultProps {
 
 export function TaskResult({ task, onApprovePhase }: TaskResultProps) {
   const [phaseApprovalFeedback, setPhaseApprovalFeedback] = useState<{ [key: string]: string }>({})
+  const [expertResultsModal, setExpertResultsModal] = useState<{
+    isOpen: boolean
+    taskId: string
+    phaseId: string
+    phaseName: string
+  }>({
+    isOpen: false,
+    taskId: '',
+    phaseId: '',
+    phaseName: ''
+  })
+
+  const openExpertResults = (taskId: string, phaseId: string, phaseName: string) => {
+    setExpertResultsModal({
+      isOpen: true,
+      taskId,
+      phaseId,
+      phaseName
+    })
+  }
+
+  const closeExpertResults = () => {
+    setExpertResultsModal({
+      isOpen: false,
+      taskId: '',
+      phaseId: '',
+      phaseName: ''
+    })
+  }
 
   if (!task) {
     return (
@@ -238,14 +268,26 @@ export function TaskResult({ task, onApprovePhase }: TaskResultProps) {
                         Phase {phaseIndex + 1}: {phase.name}
                       </h4>
                     </div>
-                    <div className={`px-3 py-1 rounded-full text-sm font-bold ${
-                      phase.status === 'completed' || phase.status === 'approved' ? 'status-success' :
-                      phase.status === 'rejected' ? 'status-error' :
-                      phase.status === 'running' ? 'status-running' :
-                      phase.status === 'awaiting_approval' ? 'bg-yellow-200 text-yellow-800' :
-                      'bg-gray-200 text-gray-800'
-                    }`}>
-                      {phase.status.toUpperCase()}
+                    <div className="flex items-center space-x-3">
+                      {/* View Details Button */}
+                      {phase.status === 'completed' || phase.status === 'approved' ? (
+                        <button
+                          onClick={() => openExpertResults(task.orchestratorId || task.id, phase.id, phase.name)}
+                          className="flex items-center space-x-2 px-3 py-1 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors"
+                        >
+                          <Eye className="w-4 h-4" />
+                          <span>View Details</span>
+                        </button>
+                      ) : null}
+                      <div className={`px-3 py-1 rounded-full text-sm font-bold ${
+                        phase.status === 'completed' || phase.status === 'approved' ? 'status-success' :
+                        phase.status === 'rejected' ? 'status-error' :
+                        phase.status === 'running' ? 'status-running' :
+                        phase.status === 'awaiting_approval' ? 'bg-yellow-200 text-yellow-800' :
+                        'bg-gray-200 text-gray-800'
+                      }`}>
+                        {phase.status.toUpperCase()}
+                      </div>
                     </div>
                   </div>
                   
@@ -368,6 +410,15 @@ export function TaskResult({ task, onApprovePhase }: TaskResultProps) {
           </div>
         )}
       </div>
+      
+      {/* Expert Results Modal */}
+      <ExpertResultsModal
+        taskId={expertResultsModal.taskId}
+        phaseId={expertResultsModal.phaseId}
+        phaseName={expertResultsModal.phaseName}
+        isOpen={expertResultsModal.isOpen}
+        onClose={closeExpertResults}
+      />
     </div>
   )
 }
