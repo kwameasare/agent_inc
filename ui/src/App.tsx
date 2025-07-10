@@ -159,7 +159,7 @@ function App() {
   const updateTaskFromWebSocket = async (taskId: string) => {
     // Fetch the latest task status from the API
     try {
-      const response = await fetch(`http://localhost:8080/api/task/${taskId}`)
+      const response = await fetch(`http://localhost:8081/api/task/${taskId}`)
       if (response.ok) {
         const updatedTask = await response.json()
         
@@ -192,7 +192,7 @@ function App() {
 
   const fetchTaskStatus = async (taskId: string) => {
     try {
-      const response = await fetch(`http://localhost:8080/api/task/${taskId}`)
+      const response = await fetch(`http://localhost:8081/api/task/${taskId}`)
       if (response.ok) {
         const taskStatus = await response.json()
         
@@ -236,7 +236,7 @@ function App() {
 
     try {
       // Call orchestrator API to submit task
-      const response = await fetch('http://localhost:8080/api/task', {
+      const response = await fetch('http://localhost:8081/api/task', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -278,7 +278,7 @@ function App() {
 
   const approvePhase = async (taskId: string, phaseId: string, approved: boolean, feedback?: string) => {
     try {
-      const response = await fetch('http://localhost:8080/api/phases/approve', {
+      const response = await fetch('http://localhost:8081/api/phases/approve', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

@@ -128,7 +128,7 @@ func main() {
 	http.HandleFunc("/health", handleHealth)
 
 	// Serve static files for the UI
-	fs := http.FileServer(http.Dir("../ui/dist"))
+	fs := http.FileServer(http.Dir("./ui/dist"))
 	http.Handle("/", http.StripPrefix("/", fs))
 
 	log.Println("🚀 Orchestrator starting...")

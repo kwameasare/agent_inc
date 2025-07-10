@@ -66,15 +66,29 @@ func (m *Manager) SpawnAgent(ctx context.Context) (*AgentContainer, error) {
 
 	portBindings := nat.PortMap{containerPort: []nat.PortBinding{hostBinding}}
 
+	// Get the current OPENAI_API_KEY - ensure we get the fresh value
+	openaiKey := os.Getenv("OPENAI_API_KEY")
+	if openaiKey == "" {
+		return nil, fmt.Errorf("OPENAI_API_KEY environment variable not set")
+	}
+	log.Printf("🔑 Using OpenAI API key ending in: ...%s", openaiKey[len(openaiKey)-4:])
+	log.Printf("🔑 Full API key length: %d characters", len(openaiKey))
+	log.Printf("🔑 API key starts with: %s...", openaiKey[:20])
+	
+	// Prepare environment variables for the container
+	envVars := []string{"OPENAI_API_KEY=" + openaiKey}
+	log.Printf("🔑 Environment variable being passed: OPENAI_API_KEY=%s...%s (length: %d)", 
+		openaiKey[:20], openaiKey[len(openaiKey)-4:], len(openaiKey))
+	
 	// Create with minimal configuration that matches manual approach
 	resp, err := m.cli.ContainerCreate(ctx, &container.Config{
 		Image:        "agentic-engineering-system_generic_agent",
 		Cmd:          []string{"python", "agent.py", port},
-		Env:          []string{"OPENAI_API_KEY=" + os.Getenv("OPENAI_API_KEY")},
+		Env:          envVars,
 		ExposedPorts: nat.PortSet{containerPort: struct{}{}}, // Explicitly expose the port
 	}, &container.HostConfig{
 		PortBindings: portBindings,
-		AutoRemove:   true, // Match the --rm flag from manual approach
+		AutoRemove:   false, // Disable for debugging - keep containers around to inspect
 	}, nil, nil, "")
 	if err != nil {
 		return nil, err
@@ -98,7 +112,7 @@ func (m *Manager) SpawnAgent(ctx context.Context) (*AgentContainer, error) {
 
 	for time.Since(startTime) < maxWaitTime {
 		// Try to connect to the port to see if it's accepting connections
-		conn, err := net.DialTimeout("tcp", "127.0.0.1:"+port, 2*time.Second)
+		conn, err := net.DialTimeout("tcp", "host.docker.internal:"+port, 2*time.Second)
 		if err == nil {
 			conn.Close()
 			log.Printf("✅ Agent container %s is ready and accepting connections", resp.ID[:12])
@@ -118,7 +132,7 @@ func (m *Manager) SpawnAgent(ctx context.Context) (*AgentContainer, error) {
 
 	return &AgentContainer{
 		ID:      resp.ID,
-		Address: "127.0.0.1:" + port, // Use explicit IPv4 address instead of localhost
+		Address: "host.docker.internal:" + port, // Use Docker host reference to reach host-bound ports
 		Port:    port,
 	}, nil
 }

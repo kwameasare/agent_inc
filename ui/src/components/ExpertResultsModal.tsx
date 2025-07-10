@@ -26,7 +26,7 @@ export function ExpertResultsModal({ taskId, phaseId, phaseName, isOpen, onClose
     
     setLoading(true)
     try {
-      const response = await fetch(`http://localhost:8080/api/phase/${taskId}/${phaseId}`)
+      const response = await fetch(`http://localhost:8081/api/phase/${taskId}/${phaseId}`)
       if (response.ok) {
         const data = await response.json()
         setExpertResults(data.detailedResults || {})
