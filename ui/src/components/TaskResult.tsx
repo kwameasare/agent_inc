@@ -1,11 +1,15 @@
-import { CheckCircle, XCircle, Clock, Loader2, FileText, AlertTriangle } from 'lucide-react'
+import { CheckCircle, XCircle, Clock, Loader2, FileText, AlertTriangle, Users, CheckCircle2, Pause } from 'lucide-react'
+import { useState } from 'react'
 import type { Task } from '../App'
 
 interface TaskResultProps {
   task: Task | null
+  onApprovePhase?: (taskId: string, phaseId: string, approved: boolean, feedback?: string) => Promise<any>
 }
 
-export function TaskResult({ task }: TaskResultProps) {
+export function TaskResult({ task, onApprovePhase }: TaskResultProps) {
+  const [phaseApprovalFeedback, setPhaseApprovalFeedback] = useState<{ [key: string]: string }>({})
+
   if (!task) {
     return (
       <div className="card-3d p-10 text-center relative">
@@ -36,6 +40,13 @@ export function TaskResult({ task }: TaskResultProps) {
   }
 
   const getStatusText = () => {
+    if (task.phases && task.phases.length > 0) {
+      const awaitingApprovalPhase = task.phases.find(p => p.status === 'awaiting_approval')
+      if (awaitingApprovalPhase) {
+        return 'Awaiting Phase Approval'
+      }
+    }
+    
     switch (task.status) {
       case 'completed':
         return 'Mission Accomplished!'
@@ -58,6 +69,54 @@ export function TaskResult({ task }: TaskResultProps) {
         return 'status-running'
       default:
         return 'bg-gray-200 text-gray-800'
+    }
+  }
+
+  const getPhaseStatusIcon = (status: string) => {
+    switch (status) {
+      case 'completed':
+        return <CheckCircle className="w-6 h-6 text-green-600" />
+      case 'approved':
+        return <CheckCircle className="w-6 h-6 text-green-600" />
+      case 'running':
+        return <Loader2 className="w-6 h-6 text-blue-600 animate-spin" />
+      case 'awaiting_approval':
+        return <Pause className="w-6 h-6 text-yellow-600" />
+      case 'rejected':
+        return <XCircle className="w-6 h-6 text-red-600" />
+      default:
+        return <Clock className="w-6 h-6 text-gray-500" />
+    }
+  }
+
+  const getExpertStatusIcon = (status: string) => {
+    switch (status) {
+      case 'completed':
+        return <CheckCircle2 className="w-5 h-5 text-green-600" />
+      case 'running':
+        return <Loader2 className="w-5 h-5 text-blue-600 animate-spin" />
+      case 'failed':
+        return <XCircle className="w-5 h-5 text-red-600" />
+      default:
+        return <Clock className="w-5 h-5 text-gray-500" />
+    }
+  }
+
+  const handlePhaseApproval = async (phaseId: string, approved: boolean) => {
+    if (!task.orchestratorId || !onApprovePhase) return
+    
+    try {
+      const feedback = phaseApprovalFeedback[phaseId] || ''
+      await onApprovePhase(task.orchestratorId, phaseId, approved, feedback)
+      
+      // Clear feedback after approval
+      setPhaseApprovalFeedback(prev => {
+        const updated = { ...prev }
+        delete updated[phaseId]
+        return updated
+      })
+    } catch (error) {
+      console.error('Failed to approve phase:', error)
     }
   }
 
@@ -145,6 +204,143 @@ export function TaskResult({ task }: TaskResultProps) {
                   </p>
                 </div>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* Phases (if any) */}
+        {task.phases && task.phases.length > 0 && (
+          <div>
+            <h3 className="text-2xl font-bold subtitle-gradient mb-6 flex items-center space-x-4">
+              <div className="icon-bg">
+                <div className="character-bubble p-3">
+                  <Users className="w-7 h-7 text-white" />
+                </div>
+              </div>
+              <span>Project Phases</span>
+            </h3>
+            <div className="space-y-6">
+              {task.phases.map((phase, phaseIndex) => (
+                <div 
+                  key={phase.id}
+                  className={`activity-item p-6 ${
+                    phase.status === 'completed' || phase.status === 'approved' ? 'activity-success' :
+                    phase.status === 'rejected' ? 'activity-error' :
+                    phase.status === 'running' ? 'activity-info' :
+                    phase.status === 'awaiting_approval' ? 'activity-warning' :
+                    'bg-gray-100'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="flex items-center space-x-3">
+                      {getPhaseStatusIcon(phase.status)}
+                      <h4 className="text-xl font-bold text-gray-800">
+                        Phase {phaseIndex + 1}: {phase.name}
+                      </h4>
+                    </div>
+                    <div className={`px-3 py-1 rounded-full text-sm font-bold ${
+                      phase.status === 'completed' || phase.status === 'approved' ? 'status-success' :
+                      phase.status === 'rejected' ? 'status-error' :
+                      phase.status === 'running' ? 'status-running' :
+                      phase.status === 'awaiting_approval' ? 'bg-yellow-200 text-yellow-800' :
+                      'bg-gray-200 text-gray-800'
+                    }`}>
+                      {phase.status.toUpperCase()}
+                    </div>
+                  </div>
+                  
+                  <p className="text-gray-700 font-medium mb-4">{phase.description}</p>
+                  
+                  {/* Domain Experts */}
+                  {phase.experts && phase.experts.length > 0 && (
+                    <div className="ml-4 space-y-3">
+                      <h5 className="text-lg font-bold text-gray-700 mb-3">Domain Experts:</h5>
+                      {phase.experts.map((expert, expertIndex) => (
+                        <div 
+                          key={expertIndex}
+                          className="flex items-center justify-between p-3 bg-white bg-opacity-50 rounded-lg"
+                        >
+                          <div className="flex items-center space-x-3">
+                            {getExpertStatusIcon(expert.status)}
+                            <div>
+                              <p className="font-semibold text-gray-800">{expert.role}</p>
+                              <p className="text-sm text-gray-600">{expert.expertise}</p>
+                            </div>
+                          </div>
+                          <div className={`px-2 py-1 rounded text-xs font-bold ${
+                            expert.status === 'completed' ? 'bg-green-100 text-green-800' :
+                            expert.status === 'running' ? 'bg-blue-100 text-blue-800' :
+                            expert.status === 'failed' ? 'bg-red-100 text-red-800' :
+                            'bg-gray-100 text-gray-600'
+                          }`}>
+                            {expert.status.toUpperCase()}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  
+                  {/* Phase Results */}
+                  {phase.results && Object.keys(phase.results).length > 0 && (
+                    <div className="mt-4 p-4 bg-white bg-opacity-30 rounded-lg">
+                      <h5 className="text-lg font-bold text-gray-700 mb-2">Phase Results:</h5>
+                      {Object.entries(phase.results).map(([expertRole, result]) => (
+                        <div key={expertRole} className="mb-3">
+                          <p className="font-semibold text-gray-800">{expertRole}:</p>
+                          <p className="text-gray-700 text-sm mt-1 pl-4 border-l-2 border-gray-300">
+                            {result.length > 200 ? `${result.substring(0, 200)}...` : result}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  
+                  {/* Phase Approval UI */}
+                  {phase.status === 'awaiting_approval' && onApprovePhase && task.orchestratorId && (
+                    <div className="mt-6 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+                      <h5 className="text-lg font-bold text-yellow-800 mb-3">
+                        Phase Approval Required
+                      </h5>
+                      <div className="space-y-4">
+                        <textarea
+                          className="w-full p-3 border border-yellow-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                          placeholder="Optional feedback for this phase..."
+                          value={phaseApprovalFeedback[phase.id] || ''}
+                          onChange={(e) => setPhaseApprovalFeedback(prev => ({
+                            ...prev,
+                            [phase.id]: e.target.value
+                          }))}
+                          rows={3}
+                        />
+                        <div className="flex space-x-4">
+                          <button
+                            onClick={() => handlePhaseApproval(phase.id, true)}
+                            className="flex items-center space-x-2 px-6 py-3 bg-green-600 text-white font-bold rounded-lg hover:bg-green-700 transition-colors"
+                          >
+                            <CheckCircle className="w-5 h-5" />
+                            <span>Approve Phase</span>
+                          </button>
+                          <button
+                            onClick={() => handlePhaseApproval(phase.id, false)}
+                            className="flex items-center space-x-2 px-6 py-3 bg-red-600 text-white font-bold rounded-lg hover:bg-red-700 transition-colors"
+                          >
+                            <XCircle className="w-5 h-5" />
+                            <span>Reject Phase</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  
+                  {/* User Feedback Display */}
+                  {phase.userFeedback && (
+                    <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                      <h5 className="font-semibold text-blue-800 mb-2">User Feedback:</h5>
+                      <p className="text-blue-700">{phase.userFeedback}</p>
+                    </div>
+                  )}
+                </div>
+              ))}
             </div>
           </div>
         )}

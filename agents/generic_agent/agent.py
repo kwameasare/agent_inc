@@ -33,6 +33,49 @@ class GenericAgentServicer(agent_pb2_grpc.GenericAgentServicer):
                     error_message=error_msg
                 )
 
+            # Special case: if this is a JSON response generator, skip analysis and go directly to execution
+            if "JSON response generator" in request.persona_prompt or "ONLY output valid JSON" in request.persona_prompt:
+                logger.info(f"📋 Task {request.task_id}: Detected JSON response request, executing directly")
+                
+                # Create a focused prompt for JSON generation
+                json_prompt = f"""
+{request.persona_prompt}
+
+Task: {request.task_instructions}
+
+Requirements:
+- Output ONLY valid JSON
+- No explanations or additional text
+- Follow the exact format requested
+- Ensure all JSON is properly formatted and complete
+"""
+                
+                try:
+                    json_response = completion(
+                        model="gpt-4o",
+                        messages=[{"role": "user", "content": json_prompt}],
+                        response_format={"type": "json_object"},
+                        timeout=120
+                    )
+                    
+                    content = json_response.choices[0].message.content.strip()
+                    logger.info(f"✅ Task {request.task_id}: Generated JSON response ({len(content)} chars)")
+                    
+                    return agent_pb2.TaskResult(
+                        task_id=request.task_id,
+                        success=True,
+                        final_content=content
+                    )
+                    
+                except Exception as e:
+                    error_msg = f"JSON generation failed: {str(e)}"
+                    logger.error(f"❌ Task {request.task_id}: {error_msg}")
+                    return agent_pb2.TaskResult(
+                        task_id=request.task_id,
+                        success=False,
+                        error_message=error_msg
+                    )
+
             # This is the crucial "meta-prompt" or "Chain of Thought" prompt.
             # It instructs the LLM to first analyze the task's complexity.
             analysis_prompt = f"""

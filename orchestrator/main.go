@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,16 +24,48 @@ var (
 )
 
 type TaskExecution struct {
-	ID       string                `json:"id"`
-	Task     string                `json:"task"`
-	Status   string                `json:"status"`
-	Result   string                `json:"result,omitempty"`
-	Error    string                `json:"error,omitempty"`
-	Started  time.Time             `json:"started"`
-	Tree     *tasktree.Tree        `json:"-"`
-	RootNode *tasktree.Node        `json:"-"`
-	Context  context.Context       `json:"-"`
-	Cancel   context.CancelFunc    `json:"-"`
+	ID                   string             `json:"id"`
+	Task                 string             `json:"task"`
+	Status               string             `json:"status"`
+	Result               string             `json:"result,omitempty"`
+	Error                string             `json:"error,omitempty"`
+	Started              time.Time          `json:"started"`
+	Tree                 *tasktree.Tree     `json:"-"`
+	RootNode             *tasktree.Node     `json:"-"`
+	Context              context.Context    `json:"-"`
+	Cancel               context.CancelFunc `json:"-"`
+	Phases               []ProjectPhase     `json:"phases,omitempty"`
+	CurrentPhase         int                `json:"currentPhase"`
+	RequiresUserApproval bool               `json:"requiresUserApproval"`
+}
+
+type ProjectPhase struct {
+	ID           string            `json:"id"`
+	Name         string            `json:"name"`
+	Description  string            `json:"description"`
+	Status       string            `json:"status"` // "pending", "approved", "running", "completed", "rejected"
+	Experts      []DomainExpert    `json:"experts"`
+	Results      map[string]string `json:"results,omitempty"`
+	StartTime    *time.Time        `json:"startTime,omitempty"`
+	EndTime      *time.Time        `json:"endTime,omitempty"`
+	Approved     bool              `json:"approved"`
+	UserFeedback string            `json:"userFeedback,omitempty"`
+}
+
+type DomainExpert struct {
+	Role      string `json:"role"`
+	Expertise string `json:"expertise"`
+	Persona   string `json:"persona"`
+	Task      string `json:"task"`
+	Status    string `json:"status"` // "pending", "running", "completed", "failed"
+	Result    string `json:"result,omitempty"`
+}
+
+type PhaseApprovalRequest struct {
+	TaskID       string `json:"taskId"`
+	PhaseID      string `json:"phaseId"`
+	Approved     bool   `json:"approved"`
+	UserFeedback string `json:"userFeedback,omitempty"`
 }
 
 type TaskRequest struct {
@@ -62,6 +95,7 @@ func main() {
 	// Setup HTTP routes
 	http.HandleFunc("/api/task", enableCORS(handleTask))
 	http.HandleFunc("/api/task/", enableCORS(handleTaskStatus))
+	http.HandleFunc("/api/phases/approve", enableCORS(handlePhaseApproval))
 	http.HandleFunc("/health", handleHealth)
 
 	// Serve static files for the UI
@@ -113,7 +147,7 @@ func handleTask(w http.ResponseWriter, r *http.Request) {
 		// Create new task execution
 		taskID := fmt.Sprintf("task_%d", time.Now().Unix())
 		ctx, cancel := context.WithCancel(context.Background())
-		
+
 		execution := &TaskExecution{
 			ID:      taskID,
 			Task:    req.Task,
@@ -210,20 +244,419 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(health)
 }
 
+func handlePhaseApproval(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req PhaseApprovalRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Find the task execution
+	tasksMutex.Lock()
+	execution, exists := currentTasks[req.TaskID]
+	if !exists {
+		tasksMutex.Unlock()
+		http.Error(w, "Task not found", http.StatusNotFound)
+		return
+	}
+
+	// Find the phase by ID
+	var phase *ProjectPhase
+	for i := range execution.Phases {
+		if execution.Phases[i].ID == req.PhaseID {
+			phase = &execution.Phases[i]
+			break
+		}
+	}
+
+	if phase == nil {
+		tasksMutex.Unlock()
+		http.Error(w, "Phase not found", http.StatusNotFound)
+		return
+	}
+
+	// Update phase approval status
+	phase.Approved = req.Approved
+	phase.UserFeedback = req.UserFeedback
+
+	if req.Approved {
+		phase.Status = "approved"
+		log.Printf("✅ [%s] Phase %s approved by user", req.TaskID, req.PhaseID)
+
+		// Continue with the next phase if there is one
+		if execution.CurrentPhase < len(execution.Phases)-1 {
+			execution.CurrentPhase++
+			go startNextPhase(execution)
+		} else {
+			execution.Status = "completed"
+			log.Printf("🎉 [%s] All phases completed", req.TaskID)
+		}
+	} else {
+		phase.Status = "rejected"
+		execution.Status = "failed"
+		execution.Error = "Phase rejected by user: " + req.UserFeedback
+		log.Printf("❌ [%s] Phase %s rejected by user: %s", req.TaskID, req.PhaseID, req.UserFeedback)
+	}
+
+	tasksMutex.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"phase":   phase,
+		"task":    execution,
+	})
+}
+
+func startNextPhase(execution *TaskExecution) {
+	tasksMutex.Lock()
+	defer tasksMutex.Unlock()
+
+	if execution.CurrentPhase >= len(execution.Phases) {
+		log.Printf("⚠️ [%s] No more phases to execute", execution.ID)
+		return
+	}
+
+	currentPhase := &execution.Phases[execution.CurrentPhase]
+	currentPhase.Status = "running"
+	currentPhase.StartTime = &[]time.Time{time.Now()}[0]
+
+	log.Printf("🚀 [%s] Starting phase %d: %s", execution.ID, execution.CurrentPhase+1, currentPhase.Name)
+
+	// Execute the domain experts in this phase
+	for i := range currentPhase.Experts {
+		go executeDomainExpert(execution.ID, currentPhase, &currentPhase.Experts[i])
+	}
+}
+
+func executeDomainExpert(taskID string, phase *ProjectPhase, expert *DomainExpert) {
+	log.Printf("👨‍💼 [%s] Starting domain expert: %s", taskID, expert.Role)
+
+	expert.Status = "running"
+
+	// Create agent container
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	agentContainer, err := dockerManager.SpawnAgent(ctx)
+	if err != nil {
+		expert.Status = "failed"
+		expert.Result = fmt.Sprintf("Error spawning agent: %v", err)
+		log.Printf("❌ [%s] Failed to spawn agent for domain expert %s: %v", taskID, expert.Role, err)
+		return
+	}
+
+	// Cleanup agent when done
+	defer func() {
+		log.Printf("🧹 [%s] Cleaning up agent container for %s", taskID, expert.Role)
+		if err := dockerManager.StopAgent(ctx, agentContainer.ID); err != nil {
+			log.Printf("⚠️ Failed to cleanup agent container: %v", err)
+		}
+	}()
+
+	log.Printf("✅ [%s] Agent container spawned for %s: %s at %s", taskID, expert.Role, agentContainer.ID[:12], agentContainer.Address)
+
+	// Execute the expert's task with empty context data
+	contextData := make(map[string]string)
+	result, err := tasks.ExecuteTaskOnAgent(agentContainer.Address, expert.Role, expert.Persona, expert.Task, contextData)
+	if err != nil {
+		expert.Status = "failed"
+		expert.Result = fmt.Sprintf("Error: %v", err)
+		log.Printf("❌ [%s] Domain expert %s failed: %v", taskID, expert.Role, err)
+		return
+	}
+
+	// Check for agent-reported errors
+	if !result.Success {
+		expert.Status = "failed"
+		expert.Result = "AGENT ERROR: " + result.ErrorMessage
+		log.Printf("❌ [%s] Domain expert %s reported failure: %s", taskID, expert.Role, result.ErrorMessage)
+		return
+	}
+
+	expert.Status = "completed"
+	expert.Result = result.FinalContent
+
+	// Store result in phase results
+	tasksMutex.Lock()
+	if phase.Results == nil {
+		phase.Results = make(map[string]string)
+	}
+	phase.Results[expert.Role] = result.FinalContent
+	tasksMutex.Unlock()
+
+	log.Printf("✅ [%s] Domain expert %s completed", taskID, expert.Role)
+
+	// Check if all experts in this phase are done
+	checkPhaseCompletion(taskID, phase)
+}
+
+func checkPhaseCompletion(taskID string, phase *ProjectPhase) {
+	tasksMutex.Lock()
+	defer tasksMutex.Unlock()
+
+	allCompleted := true
+	for _, expert := range phase.Experts {
+		if expert.Status != "completed" && expert.Status != "failed" {
+			allCompleted = false
+			break
+		}
+	}
+
+	if allCompleted {
+		phase.Status = "completed"
+		phase.EndTime = &[]time.Time{time.Now()}[0]
+
+		// Check if this phase requires user approval
+		execution := currentTasks[taskID]
+		if execution != nil && execution.RequiresUserApproval {
+			phase.Status = "awaiting_approval"
+			log.Printf("⏳ [%s] Phase %s completed, awaiting user approval", taskID, phase.ID)
+		} else {
+			// Auto-approve and continue
+			phase.Approved = true
+			phase.Status = "approved"
+			if execution.CurrentPhase < len(execution.Phases)-1 {
+				execution.CurrentPhase++
+				go startNextPhase(execution)
+			} else {
+				execution.Status = "completed"
+				log.Printf("🎉 [%s] All phases completed", taskID)
+			}
+		}
+	}
+}
+
 func executeTask(execution *TaskExecution) {
 	log.Printf("🚀 [%s] Starting task execution: %s", execution.ID, execution.Task[:min(100, len(execution.Task))])
 
 	// Update status to running
 	tasksMutex.Lock()
 	execution.Status = "running"
+	execution.RequiresUserApproval = true // Enable phased execution with user approval
 	tasksMutex.Unlock()
+
+	// First, use a lead agent to break down the task into phases with domain experts
+	if len(execution.Phases) == 0 {
+		log.Printf("📋 [%s] Breaking down task into phases with domain experts", execution.ID)
+
+		// Create a lead agent to analyze and break down the task
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+
+		agentContainer, err := dockerManager.SpawnAgent(ctx)
+		if err != nil {
+			tasksMutex.Lock()
+			execution.Status = "failed"
+			execution.Error = fmt.Sprintf("Failed to spawn lead agent: %v", err)
+			tasksMutex.Unlock()
+			log.Printf("❌ [%s] Failed to spawn lead agent: %v", execution.ID, err)
+			return
+		}
+
+		defer func() {
+			log.Printf("🧹 [%s] Cleaning up lead agent container", execution.ID)
+			if err := dockerManager.StopAgent(ctx, agentContainer.ID); err != nil {
+				log.Printf("⚠️ Failed to cleanup lead agent container: %v", err)
+			}
+		}()
+
+		// Task breakdown prompt for the lead agent - focused on getting valid JSON
+		breakdownTask := fmt.Sprintf(`You are a senior project manager. Break down this task into phases with domain experts.
+
+TASK: %s
+
+Your response MUST be ONLY this JSON format, no other text:
+
+{
+  "phases": [
+    {
+      "id": "phase-1",
+      "name": "Requirements and Planning",
+      "description": "Analyze requirements and create detailed plans",
+      "experts": [
+        {
+          "role": "Business Analyst",
+          "expertise": "Requirements analysis and stakeholder management",
+          "persona": "Senior business analyst with 10+ years experience translating business needs into technical requirements",
+          "task": "Analyze the task requirements and define detailed functional specifications"
+        },
+        {
+          "role": "Technical Architect",
+          "expertise": "System architecture and technology selection",
+          "persona": "Expert system architect specializing in scalable, maintainable system design",
+          "task": "Define the technical architecture and technology stack recommendations"
+        },
+        {
+          "role": "UX Designer",
+          "expertise": "User experience design and interface planning",
+          "persona": "Lead UX designer with expertise in user-centered design and accessibility",
+          "task": "Create user experience framework and interface design guidelines"
+        }
+      ]
+    }
+  ]
+}
+
+RULES:
+- Maximum 10 experts in phase 1
+- Each expert gets ONE specific task
+- Experts do NOT delegate further
+- Focus on planning/design before implementation
+- Return ONLY the JSON, nothing else`, execution.Task)
+
+		leadPersona := "You are a JSON response generator. You ONLY output valid JSON. You never include explanations, comments, or any text outside the JSON structure. You are expert at project planning and always return exactly the requested JSON format."
+
+		contextData := make(map[string]string)
+		result, err := tasks.ExecuteTaskOnAgent(agentContainer.Address, "lead-planner", leadPersona, breakdownTask, contextData)
+		if err != nil {
+			tasksMutex.Lock()
+			execution.Status = "failed"
+			execution.Error = fmt.Sprintf("Lead agent planning failed: %v", err)
+			tasksMutex.Unlock()
+			log.Printf("❌ [%s] Lead agent planning failed: %v", execution.ID, err)
+			return
+		}
+
+		if !result.Success {
+			tasksMutex.Lock()
+			execution.Status = "failed"
+			execution.Error = "Lead agent reported planning failure: " + result.ErrorMessage
+			tasksMutex.Unlock()
+			log.Printf("❌ [%s] Lead agent reported planning failure: %s", execution.ID, result.ErrorMessage)
+			return
+		}
+
+		// Parse the JSON response to extract phases
+		var planResponse struct {
+			Phases []struct {
+				ID          string `json:"id"`
+				Name        string `json:"name"`
+				Description string `json:"description"`
+				Experts     []struct {
+					Role      string `json:"role"`
+					Expertise string `json:"expertise"`
+					Persona   string `json:"persona"`
+					Task      string `json:"task"`
+				} `json:"experts"`
+			} `json:"phases"`
+		}
+
+		// Try to extract JSON from the response (in case agent included extra text)
+		content := strings.TrimSpace(result.FinalContent)
+		log.Printf("🔍 [%s] Raw planning response: '%s'", execution.ID, content[:min(300, len(content))])
+
+		// Clean the content - remove any markdown formatting
+		content = strings.TrimPrefix(content, "```json")
+		content = strings.TrimSuffix(content, "```")
+		content = strings.TrimSpace(content)
+
+		// Look for JSON object boundaries
+		startIdx := -1
+		endIdx := -1
+		braceCount := 0
+
+		for i, char := range content {
+			if char == '{' {
+				if startIdx == -1 {
+					startIdx = i
+				}
+				braceCount++
+			} else if char == '}' {
+				braceCount--
+				if braceCount == 0 && startIdx != -1 {
+					endIdx = i + 1
+					break
+				}
+			}
+		}
+
+		var jsonContent string
+		if startIdx != -1 && endIdx != -1 {
+			jsonContent = content[startIdx:endIdx]
+		} else if len(content) > 0 && content[0] == '{' {
+			// If starts with { but no complete object found, try the whole content
+			jsonContent = content
+		} else {
+			log.Printf("⚠️ [%s] No valid JSON structure found in response, falling back to tree execution", execution.ID)
+			log.Printf("🔍 [%s] Full response content: '%s'", execution.ID, content)
+			executeTaskWithTree(execution)
+			return
+		}
+
+		log.Printf("🔍 [%s] Attempting to parse JSON: %s", execution.ID, jsonContent[:min(200, len(jsonContent))])
+
+		if err := json.Unmarshal([]byte(jsonContent), &planResponse); err != nil {
+			log.Printf("⚠️ [%s] Failed to parse JSON, falling back to tree execution: %v", execution.ID, err)
+			log.Printf("🔍 [%s] JSON content was: %s", execution.ID, jsonContent)
+			executeTaskWithTree(execution)
+			return
+		}
+
+		// Validate the response structure
+		if len(planResponse.Phases) == 0 {
+			log.Printf("⚠️ [%s] No phases in response, falling back to tree execution", execution.ID)
+			executeTaskWithTree(execution)
+			return
+		}
+
+		// Convert to our phase structure
+		tasksMutex.Lock()
+		execution.Phases = make([]ProjectPhase, len(planResponse.Phases))
+		for i, phase := range planResponse.Phases {
+			execution.Phases[i] = ProjectPhase{
+				ID:          phase.ID,
+				Name:        phase.Name,
+				Description: phase.Description,
+				Status:      "pending",
+				Results:     make(map[string]string),
+			}
+
+			// Convert experts
+			execution.Phases[i].Experts = make([]DomainExpert, len(phase.Experts))
+			for j, expert := range phase.Experts {
+				execution.Phases[i].Experts[j] = DomainExpert{
+					Role:      expert.Role,
+					Expertise: expert.Expertise,
+					Persona:   expert.Persona,
+					Task:      expert.Task,
+					Status:    "pending",
+				}
+			}
+		}
+		execution.CurrentPhase = 0
+		tasksMutex.Unlock()
+
+		log.Printf("✅ [%s] Task broken down into %d phases", execution.ID, len(execution.Phases))
+		for i, phase := range execution.Phases {
+			log.Printf("📋 [%s] Phase %d: %s (%d experts)", execution.ID, i+1, phase.Name, len(phase.Experts))
+		}
+	}
+
+	// Start execution of the first phase
+	if len(execution.Phases) > 0 {
+		log.Printf("🎬 [%s] Starting phased execution", execution.ID)
+		startNextPhase(execution)
+	} else {
+		log.Printf("⚠️ [%s] No phases created, falling back to tree execution", execution.ID)
+		executeTaskWithTree(execution)
+	}
+}
+
+func executeTaskWithTree(execution *TaskExecution) {
+	log.Printf("🌳 [%s] Using tree-based execution", execution.ID)
 
 	// Create task tree
 	execution.Tree = tasktree.NewTree()
-	
+
 	// Default persona for general tasks
 	persona := "You are an elite AI assistant with expertise across multiple domains including technology, business, science, and creative fields. You excel at analyzing complex problems, breaking them down into manageable components, and coordinating specialized approaches when needed."
-	
+
 	execution.RootNode = execution.Tree.AddNode("", persona, execution.Task)
 	log.Printf("📋 [%s] Created root node: %s", execution.ID, execution.RootNode.ID)
 
@@ -241,11 +674,9 @@ func executeTask(execution *TaskExecution) {
 	} else {
 		execution.Status = "error"
 		execution.Error = execution.RootNode.Result
-		log.Printf("❌ [%s] Task failed: %s", execution.ID, execution.Error)
+		log.Printf("❌ [%s] Task failed: %s", execution.ID, execution.RootNode.Result)
 	}
 	tasksMutex.Unlock()
-
-	log.Printf("🏁 [%s] Task execution finished with status: %s", execution.ID, execution.Status)
 }
 
 // executeNode is the core recursive function of the orchestrator.

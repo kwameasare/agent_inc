@@ -5,15 +5,40 @@ import { TaskResult } from './components/TaskResult'
 import { Header } from './components/Header'
 import { ActivityLog } from './components/ActivityLog'
 
+export interface DomainExpert {
+  role: string
+  expertise: string
+  persona: string
+  task: string
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  result?: string
+}
+
+export interface ProjectPhase {
+  id: string
+  name: string
+  description: string
+  status: 'pending' | 'approved' | 'running' | 'completed' | 'rejected' | 'awaiting_approval'
+  experts: DomainExpert[]
+  results?: { [key: string]: string }
+  startTime?: string
+  endTime?: string
+  approved: boolean
+  userFeedback?: string
+}
+
 export interface Task {
   id: string
   description: string
-  status: 'pending' | 'running' | 'completed' | 'error'
+  status: 'pending' | 'running' | 'completed' | 'error' | 'failed'
   result?: string
   error?: string
   timestamp: Date
   subtasks?: Task[]
   orchestratorId?: string
+  phases?: ProjectPhase[]
+  currentPhase?: number
+  requiresUserApproval?: boolean
 }
 
 function App() {
@@ -70,24 +95,31 @@ function App() {
 
             const taskStatus = await statusResponse.json()
             
+            // Update task with phase information
+            const updatedTask = { 
+              ...runningTask, 
+              status: taskStatus.status,
+              result: taskStatus.result,
+              error: taskStatus.error,
+              phases: taskStatus.phases,
+              currentPhase: taskStatus.currentPhase,
+              requiresUserApproval: taskStatus.requiresUserApproval
+            }
+            
             if (taskStatus.status === 'completed') {
-              const completedTask = { 
-                ...runningTask, 
-                status: 'completed' as const, 
-                result: taskStatus.result 
-              }
+              const completedTask = { ...updatedTask, status: 'completed' as const }
               setTasks(prev => prev.map(t => t.id === newTask.id ? completedTask : t))
               setCurrentTask(completedTask)
               break
-            } else if (taskStatus.status === 'error') {
-              const errorTask = { 
-                ...runningTask, 
-                status: 'error' as const, 
-                error: taskStatus.error || 'Task failed' 
-              }
+            } else if (taskStatus.status === 'error' || taskStatus.status === 'failed') {
+              const errorTask = { ...updatedTask, status: 'error' as const }
               setTasks(prev => prev.map(t => t.id === newTask.id ? errorTask : t))
               setCurrentTask(errorTask)
               break
+            } else {
+              // Update task with current status and phase info
+              setTasks(prev => prev.map(t => t.id === newTask.id ? updatedTask : t))
+              setCurrentTask(updatedTask)
             }
             
             // Wait 2 seconds before polling again
@@ -113,6 +145,61 @@ function App() {
       setCurrentTask(errorTask)
     } finally {
       setIsLoading(false)
+    }
+  }
+
+  const approvePhase = async (taskId: string, phaseId: string, approved: boolean, feedback?: string) => {
+    try {
+      const response = await fetch('http://localhost:8080/api/phases/approve', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          taskId,
+          phaseId,
+          approved,
+          userFeedback: feedback || ''
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error(`Failed to approve phase: ${response.status}`)
+      }
+
+      const result = await response.json()
+      
+      // Update the current task with the approved phase
+      if (currentTask && currentTask.orchestratorId === taskId) {
+        setTasks(prev => prev.map(task => {
+          if (task.orchestratorId === taskId) {
+            const updatedPhases = task.phases?.map(phase => 
+              phase.id === phaseId 
+                ? { ...phase, approved, userFeedback: feedback, status: (approved ? 'approved' : 'rejected') as ProjectPhase['status'] }
+                : phase
+            )
+            return { ...task, phases: updatedPhases }
+          }
+          return task
+        }))
+        
+        setCurrentTask(prev => {
+          if (prev && prev.orchestratorId === taskId) {
+            const updatedPhases = prev.phases?.map(phase => 
+              phase.id === phaseId 
+                ? { ...phase, approved, userFeedback: feedback, status: (approved ? 'approved' : 'rejected') as ProjectPhase['status'] }
+                : phase
+            )
+            return { ...prev, phases: updatedPhases }
+          }
+          return prev
+        })
+      }
+      
+      return result
+    } catch (error) {
+      console.error('Phase approval error:', error)
+      throw error
     }
   }
 
@@ -185,7 +272,7 @@ function App() {
 
           {/* Right Column - Results - Takes 2/5 of width */}
           <div className="lg:col-span-2 space-y-10">
-            <TaskResult task={currentTask} />
+            <TaskResult task={currentTask} onApprovePhase={approvePhase} />
             <ActivityLog />
           </div>
         </div>
