@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"sync"
 	"time"
@@ -13,39 +15,241 @@ import (
 	"agentic-engineering-system/tasktree"
 )
 
+// Global state for the orchestrator
+var (
+	dockerManager *docker.Manager
+	currentTasks  = make(map[string]*TaskExecution)
+	tasksMutex    sync.RWMutex
+)
+
+type TaskExecution struct {
+	ID       string                `json:"id"`
+	Task     string                `json:"task"`
+	Status   string                `json:"status"`
+	Result   string                `json:"result,omitempty"`
+	Error    string                `json:"error,omitempty"`
+	Started  time.Time             `json:"started"`
+	Tree     *tasktree.Tree        `json:"-"`
+	RootNode *tasktree.Node        `json:"-"`
+	Context  context.Context       `json:"-"`
+	Cancel   context.CancelFunc    `json:"-"`
+}
+
+type TaskRequest struct {
+	Task string `json:"task"`
+}
+
+type TaskResponse struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+}
+
 func main() {
 	// Check for OpenAI API key
 	if os.Getenv("OPENAI_API_KEY") == "" {
 		log.Fatal("OPENAI_API_KEY environment variable is required")
 	}
 
+	// Initialize Docker manager
 	ctx := context.Background()
-	dockerManager, err := docker.NewManager(ctx)
+	var err error
+	dockerManager, err = docker.NewManager(ctx)
 	if err != nil {
 		log.Fatalf("Failed to create docker manager: %v", err)
 	}
 	defer dockerManager.CleanupAllAgents()
 
-	taskTree := tasktree.NewTree()
+	// Setup HTTP routes
+	http.HandleFunc("/api/task", enableCORS(handleTask))
+	http.HandleFunc("/api/task/", enableCORS(handleTaskStatus))
+	http.HandleFunc("/health", handleHealth)
+
+	// Serve static files for the UI
+	fs := http.FileServer(http.Dir("../ui/dist"))
+	http.Handle("/", http.StripPrefix("/", fs))
+
+	log.Println("🚀 Orchestrator starting...")
+	log.Println("📡 HTTP API server listening on :8080")
+	log.Println("🌐 UI available at http://localhost:8080")
+	log.Println("📊 API endpoints:")
+	log.Println("   POST /api/task - Submit new task")
+	log.Println("   GET  /api/task/{id} - Get task status")
+	log.Println("   GET  /health - Health check")
+
+	if err := http.ListenAndServe(":8080", nil); err != nil {
+		log.Fatalf("Server failed to start: %v", err)
+	}
+}
+
+func enableCORS(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		handler(w, r)
+	}
+}
+
+func handleTask(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "POST":
+		var req TaskRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
+
+		if req.Task == "" {
+			http.Error(w, "Task is required", http.StatusBadRequest)
+			return
+		}
+
+		// Create new task execution
+		taskID := fmt.Sprintf("task_%d", time.Now().Unix())
+		ctx, cancel := context.WithCancel(context.Background())
+		
+		execution := &TaskExecution{
+			ID:      taskID,
+			Task:    req.Task,
+			Status:  "pending",
+			Started: time.Now(),
+			Context: ctx,
+			Cancel:  cancel,
+		}
+
+		tasksMutex.Lock()
+		currentTasks[taskID] = execution
+		tasksMutex.Unlock()
+
+		// Start task execution in background
+		go executeTask(execution)
+
+		response := TaskResponse{
+			ID:     taskID,
+			Status: "pending",
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+
+	case "GET":
+		tasksMutex.RLock()
+		tasks := make([]TaskExecution, 0, len(currentTasks))
+		for _, task := range currentTasks {
+			// Create a copy without context
+			taskCopy := TaskExecution{
+				ID:      task.ID,
+				Task:    task.Task,
+				Status:  task.Status,
+				Result:  task.Result,
+				Error:   task.Error,
+				Started: task.Started,
+			}
+			tasks = append(tasks, taskCopy)
+		}
+		tasksMutex.RUnlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(tasks)
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func handleTaskStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract task ID from URL path
+	taskID := r.URL.Path[len("/api/task/"):]
+	if taskID == "" {
+		http.Error(w, "Task ID is required", http.StatusBadRequest)
+		return
+	}
+
+	tasksMutex.RLock()
+	execution, exists := currentTasks[taskID]
+	tasksMutex.RUnlock()
+
+	if !exists {
+		http.Error(w, "Task not found", http.StatusNotFound)
+		return
+	}
+
+	// Create response without context
+	response := TaskExecution{
+		ID:      execution.ID,
+		Task:    execution.Task,
+		Status:  execution.Status,
+		Result:  execution.Result,
+		Error:   execution.Error,
+		Started: execution.Started,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func handleHealth(w http.ResponseWriter, r *http.Request) {
+	health := map[string]interface{}{
+		"status":    "healthy",
+		"timestamp": time.Now(),
+		"tasks":     len(currentTasks),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(health)
+}
+
+func executeTask(execution *TaskExecution) {
+	log.Printf("🚀 [%s] Starting task execution: %s", execution.ID, execution.Task[:min(100, len(execution.Task))])
+
+	// Update status to running
+	tasksMutex.Lock()
+	execution.Status = "running"
+	tasksMutex.Unlock()
+
+	// Create task tree
+	execution.Tree = tasktree.NewTree()
+	
+	// Default persona for general tasks
+	persona := "You are an elite AI assistant with expertise across multiple domains including technology, business, science, and creative fields. You excel at analyzing complex problems, breaking them down into manageable components, and coordinating specialized approaches when needed."
+	
+	execution.RootNode = execution.Tree.AddNode("", persona, execution.Task)
+	log.Printf("📋 [%s] Created root node: %s", execution.ID, execution.RootNode.ID)
+
 	var wg sync.WaitGroup
-
-	// 1. Initial decomposition
-	initialPersona := "You are an elite Engineering Project Manager and Technical Lead with expertise in software architecture, system design, and cross-functional team coordination. You excel at breaking down complex technical projects into manageable components and coordinating specialized teams."
-	initialTask := "Design and architect a comprehensive e-commerce platform that can handle 1 million concurrent users. The platform should include: user authentication system, product catalog with search capabilities, shopping cart and checkout system, payment processing integration, order management system, inventory tracking, admin dashboard, mobile API, security implementation, and deployment strategy with auto-scaling capabilities."
-
-	rootNode := taskTree.AddNode("", initialPersona, initialTask)
-	log.Printf("Starting workflow with root task: %s", rootNode.ID)
-
 	wg.Add(1)
-	go executeNode(ctx, &wg, taskTree, dockerManager, rootNode)
-
+	go executeNode(execution.Context, &wg, execution.Tree, dockerManager, execution.RootNode, execution.ID)
 	wg.Wait()
-	log.Println("--- Entire workflow completed ---")
-	log.Printf("Final Result for Root Task (%s):\n%s\n", rootNode.ID, rootNode.Result)
+
+	// Update final status
+	tasksMutex.Lock()
+	if execution.RootNode.Status == "completed" {
+		execution.Status = "completed"
+		execution.Result = execution.RootNode.Result
+		log.Printf("✅ [%s] Task completed successfully", execution.ID)
+	} else {
+		execution.Status = "error"
+		execution.Error = execution.RootNode.Result
+		log.Printf("❌ [%s] Task failed: %s", execution.ID, execution.Error)
+	}
+	tasksMutex.Unlock()
+
+	log.Printf("🏁 [%s] Task execution finished with status: %s", execution.ID, execution.Status)
 }
 
 // executeNode is the core recursive function of the orchestrator.
-func executeNode(ctx context.Context, wg *sync.WaitGroup, tree *tasktree.Tree, dm *docker.Manager, node *tasktree.Node) {
+func executeNode(ctx context.Context, wg *sync.WaitGroup, tree *tasktree.Tree, dm *docker.Manager, node *tasktree.Node, taskID string) {
 	defer wg.Done()
 	log.Printf("🚀 [%s] Starting execution: %s", node.ID, node.Instructions[:min(100, len(node.Instructions))])
 
@@ -128,7 +332,7 @@ func executeNode(ctx context.Context, wg *sync.WaitGroup, tree *tasktree.Tree, d
 			// Recursively call executeNode for the child.
 			subTaskWg.Add(1)
 			go func(child *tasktree.Node, taskNum int) {
-				executeNode(ctx, &subTaskWg, tree, dm, child)
+				executeNode(ctx, &subTaskWg, tree, dm, child, taskID)
 			}(childNode, i+1)
 
 			// Add a longer delay between container starts to reduce resource contention
