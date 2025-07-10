@@ -81,6 +81,7 @@ type TaskRequest struct {
 	PersonaPrompt    string                 `protobuf:"bytes,2,opt,name=persona_prompt,json=personaPrompt,proto3" json:"persona_prompt,omitempty"`                                                                     // The system prompt that defines the agent's role.
 	TaskInstructions string                 `protobuf:"bytes,3,opt,name=task_instructions,json=taskInstructions,proto3" json:"task_instructions,omitempty"`                                                            // The specific user prompt/task for the agent.
 	ContextData      map[string]string      `protobuf:"bytes,4,rep,name=context_data,json=contextData,proto3" json:"context_data,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // To pass outputs from other agents.
+	CanDelegate      bool                   `protobuf:"varint,5,opt,name=can_delegate,json=canDelegate,proto3" json:"can_delegate,omitempty"`                                                                          // Whether the agent is allowed to delegate tasks
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -141,6 +142,13 @@ func (x *TaskRequest) GetContextData() map[string]string {
 		return x.ContextData
 	}
 	return nil
+}
+
+func (x *TaskRequest) GetCanDelegate() bool {
+	if x != nil {
+		return x.CanDelegate
+	}
+	return false
 }
 
 // The result message from an agent.
@@ -229,12 +237,13 @@ const file_proto_agent_proto_rawDesc = "" +
 	"\x11proto/agent.proto\x12\x05agent\"`\n" +
 	"\x0eSubTaskRequest\x12+\n" +
 	"\x11requested_persona\x18\x01 \x01(\tR\x10requestedPersona\x12!\n" +
-	"\ftask_details\x18\x02 \x01(\tR\vtaskDetails\"\x82\x02\n" +
+	"\ftask_details\x18\x02 \x01(\tR\vtaskDetails\"\xa5\x02\n" +
 	"\vTaskRequest\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12%\n" +
 	"\x0epersona_prompt\x18\x02 \x01(\tR\rpersonaPrompt\x12+\n" +
 	"\x11task_instructions\x18\x03 \x01(\tR\x10taskInstructions\x12F\n" +
-	"\fcontext_data\x18\x04 \x03(\v2#.agent.TaskRequest.ContextDataEntryR\vcontextData\x1a>\n" +
+	"\fcontext_data\x18\x04 \x03(\v2#.agent.TaskRequest.ContextDataEntryR\vcontextData\x12!\n" +
+	"\fcan_delegate\x18\x05 \x01(\bR\vcanDelegate\x1a>\n" +
 	"\x10ContextDataEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xbd\x01\n" +

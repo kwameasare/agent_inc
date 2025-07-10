@@ -9,13 +9,43 @@ import logging
 import traceback
 import sys
 import time
+import pydantic
+from typing import List
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Define Pydantic models for validation
+class SubTask(pydantic.BaseModel):
+    requested_persona: str
+    task_details: str
+
+class LLMDecision(pydantic.BaseModel):
+    decision: str
+    reason: str
+    sub_tasks: List[SubTask] = []
+
 class GenericAgentServicer(agent_pb2_grpc.GenericAgentServicer):
     """The implementation of a generic, multi-purpose agent."""
+
+    def get_validated_decision(self, analysis_prompt: str) -> LLMDecision:
+        """Get a validated decision from the LLM with retry logic."""
+        for i in range(3):  # Retry loop
+            try:
+                response = completion(
+                    model="gpt-4o", 
+                    messages=[{"role": "user", "content": analysis_prompt}], 
+                    response_format={"type": "json_object"},
+                    timeout=60
+                )
+                data = json.loads(response.choices[0].message.content)
+                validated_data = LLMDecision.model_validate(data)
+                return validated_data
+            except (json.JSONDecodeError, pydantic.ValidationError) as e:
+                logger.warning(f"Validation failed (attempt {i+1}): {e}. Re-prompting with correction.")
+                analysis_prompt += f"\n\nYour last response failed validation with this error: {e}. Please correct your response to match the required JSON schema."
+        raise ValueError("Failed to get valid decision from LLM after 3 attempts.")
 
     def ExecuteTask(self, request, context):
         start_time = time.time()
@@ -103,16 +133,22 @@ Important: If you're synthesizing results from sub-agents (context data is provi
 
             logger.info(f"📊 Task {request.task_id}: Analyzing task complexity...")
             
-            # Step 1: Call the LLM to make the execute/delegate decision.
+            # Step 1: Call the LLM to make the execute/delegate decision with validation.
             try:
-                decision_response = completion(
-                    model="gpt-4o",  # Use a powerful model for reasoning
-                    messages=[{"role": "user", "content": analysis_prompt}],
-                    response_format={"type": "json_object"},
-                    timeout=60  # 60 second timeout
-                )
-                logger.info(f"✅ Task {request.task_id}: Received decision from LLM")
+                decision_data = self.get_validated_decision(analysis_prompt)
+                decision = decision_data.decision
+                reason = decision_data.reason
+                logger.info(f"✅ Task {request.task_id}: Received validated decision from LLM")
                 
+            except ValueError as e:
+                # Return a gRPC error
+                error_msg = str(e)
+                logger.error(f"❌ Task {request.task_id}: {error_msg}")
+                return agent_pb2.TaskResult(
+                    task_id=request.task_id, 
+                    success=False, 
+                    error_message=error_msg
+                )
             except Exception as e:
                 error_msg = f"Failed to get decision from LLM: {str(e)}"
                 logger.error(f"❌ Task {request.task_id}: {error_msg}")
@@ -121,43 +157,24 @@ Important: If you're synthesizing results from sub-agents (context data is provi
                     success=False, 
                     error_message=error_msg
                 )
-
-            try:
-                decision_data = json.loads(decision_response.choices[0].message.content)
-            except json.JSONDecodeError as e:
-                error_msg = f"Failed to parse LLM decision JSON: {str(e)}. Raw response: {decision_response.choices[0].message.content}"
-                logger.error(f"❌ Task {request.task_id}: {error_msg}")
-                return agent_pb2.TaskResult(
-                    task_id=request.task_id, 
-                    success=False, 
-                    error_message=error_msg
-                )
-
-            decision = decision_data.get("decision")
-            reason = decision_data.get("reason", "No reason provided")
             
             logger.info(f"🎯 Task {request.task_id}: Decision = {decision}, Reason = {reason}")
 
             # Step 2: Act on the decision.
             if decision == "delegate":
-                logger.info(f"🔀 Task {request.task_id}: Delegating to sub-agents...")
-                # The agent has decided to break down the task.
-                # Populate the sub_tasks field for the orchestrator.
-                result = agent_pb2.TaskResult(task_id=request.task_id, success=True)
-                sub_tasks = decision_data.get("sub_tasks", [])
-                
-                if not sub_tasks:
-                    error_msg = "Decision was 'delegate' but no sub_tasks provided"
-                    logger.error(f"❌ Task {request.task_id}: {error_msg}")
-                    return agent_pb2.TaskResult(
-                        task_id=request.task_id, 
-                        success=False, 
-                        error_message=error_msg
-                    )
-                
-                for i, sub_task_data in enumerate(sub_tasks):
-                    if not isinstance(sub_task_data, dict):
-                        error_msg = f"Sub-task {i} is not a dictionary: {sub_task_data}"
+                # --- MODIFICATION: Enforce the rule ---
+                if not request.can_delegate:
+                    logger.warning(f"Task {request.task_id}: Agent chose 'delegate' but was not permitted. Overriding to 'execute'.")
+                    decision = "execute"
+                else:
+                    logger.info(f"🔀 Task {request.task_id}: Delegating to sub-agents...")
+                    # The agent has decided to break down the task.
+                    # Populate the sub_tasks field for the orchestrator.
+                    result = agent_pb2.TaskResult(task_id=request.task_id, success=True)
+                    sub_tasks = decision_data.sub_tasks
+                    
+                    if not sub_tasks:
+                        error_msg = "Decision was 'delegate' but no sub_tasks provided"
                         logger.error(f"❌ Task {request.task_id}: {error_msg}")
                         return agent_pb2.TaskResult(
                             task_id=request.task_id, 
@@ -165,25 +182,17 @@ Important: If you're synthesizing results from sub-agents (context data is provi
                             error_message=error_msg
                         )
                     
-                    if "requested_persona" not in sub_task_data or "task_details" not in sub_task_data:
-                        error_msg = f"Sub-task {i} missing required fields: {sub_task_data}"
-                        logger.error(f"❌ Task {request.task_id}: {error_msg}")
-                        return agent_pb2.TaskResult(
-                            task_id=request.task_id, 
-                            success=False, 
-                            error_message=error_msg
-                        )
+                    for i, sub_task_data in enumerate(sub_tasks):
+                        sub_task = result.sub_tasks.add()
+                        sub_task.requested_persona = sub_task_data.requested_persona
+                        sub_task.task_details = sub_task_data.task_details
+                        logger.info(f"📋 Task {request.task_id}: Created sub-task {i+1}: {sub_task_data.requested_persona[:50]}...")
                     
-                    sub_task = result.sub_tasks.add()
-                    sub_task.requested_persona = sub_task_data["requested_persona"]
-                    sub_task.task_details = sub_task_data["task_details"]
-                    logger.info(f"📋 Task {request.task_id}: Created sub-task {i+1}: {sub_task_data['requested_persona'][:50]}...")
-                
-                elapsed = time.time() - start_time
-                logger.info(f"✅ Task {request.task_id}: Completed delegation in {elapsed:.2f}s with {len(sub_tasks)} sub-tasks")
-                return result
+                    elapsed = time.time() - start_time
+                    logger.info(f"✅ Task {request.task_id}: Completed delegation in {elapsed:.2f}s with {len(sub_tasks)} sub-tasks")
+                    return result
 
-            elif decision == "execute":
+            if decision == "execute":  # Note: now an `if` instead of `elif`
                 logger.info(f"⚡ Task {request.task_id}: Executing task directly...")
                 # The task is simple enough to execute directly.
                 # Use the provided persona to generate the final content.

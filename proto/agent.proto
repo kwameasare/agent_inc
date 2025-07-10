@@ -21,6 +21,7 @@ message TaskRequest {
   string persona_prompt = 2;    // The system prompt that defines the agent's role.
   string task_instructions = 3; // The specific user prompt/task for the agent.
   map<string, string> context_data = 4; // To pass outputs from other agents.
+  bool can_delegate = 5; // Whether the agent is allowed to delegate tasks
 }
 
 // The result message from an agent.

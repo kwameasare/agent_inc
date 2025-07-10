@@ -47,6 +47,7 @@ function App() {
   const [isLoading, setIsLoading] = useState(false)
   const [isConnected, setIsConnected] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
+  const eventSourceRef = useRef<EventSource | null>(null)
 
   // Load tasks from localStorage on component mount
   useEffect(() => {
@@ -132,6 +133,44 @@ function App() {
     }
   }, [])
 
+  // SSE connection for real-time task updates
+  useEffect(() => {
+    if (currentTask?.status === 'running' && currentTask.orchestratorId) {
+      const eventSource = new EventSource(`http://localhost:8080/api/task/${currentTask.orchestratorId}/events`)
+      eventSourceRef.current = eventSource
+      
+      eventSource.onmessage = (event) => {
+        try {
+          const updatedTaskData = JSON.parse(event.data)
+          const taskToUpdate: Task = {
+            ...updatedTaskData,
+            timestamp: new Date(updatedTaskData.started || updatedTaskData.createdAt),
+          }
+          
+          setCurrentTask(taskToUpdate)
+          setTasks(prev => prev.map(t => t.orchestratorId === taskToUpdate.id ? taskToUpdate : t))
+
+          if (taskToUpdate.status === 'completed' || taskToUpdate.status === 'failed' || taskToUpdate.status === 'error') {
+            eventSource.close()
+          }
+        } catch (error) {
+          console.error('Failed to parse SSE message:', error)
+        }
+      }
+
+      eventSource.onerror = (error) => {
+        console.error('SSE error:', error)
+        eventSource.close()
+        // Fall back to periodic polling if SSE fails
+        console.log('Falling back to WebSocket updates')
+      }
+
+      return () => {
+        eventSource.close()
+      }
+    }
+  }, [currentTask?.orchestratorId, currentTask?.status])
+
   const handleWebSocketMessage = (message: any) => {
     const { type, taskId } = message
     
@@ -159,7 +198,7 @@ function App() {
   const updateTaskFromWebSocket = async (taskId: string) => {
     // Fetch the latest task status from the API
     try {
-      const response = await fetch(`http://localhost:8081/api/task/${taskId}`)
+      const response = await fetch(`http://localhost:8080/api/task/${taskId}`)
       if (response.ok) {
         const updatedTask = await response.json()
         
@@ -192,7 +231,7 @@ function App() {
 
   const fetchTaskStatus = async (taskId: string) => {
     try {
-      const response = await fetch(`http://localhost:8081/api/task/${taskId}`)
+      const response = await fetch(`http://localhost:8080/api/task/${taskId}`)
       if (response.ok) {
         const taskStatus = await response.json()
         
@@ -236,7 +275,7 @@ function App() {
 
     try {
       // Call orchestrator API to submit task
-      const response = await fetch('http://localhost:8081/api/task', {
+      const response = await fetch('http://localhost:8080/api/task', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -261,7 +300,7 @@ function App() {
       setCurrentTask(runningTask)
 
       console.log(`Task submitted successfully. Orchestrator ID: ${orchestratorTaskId}`)
-      console.log('WebSocket will handle real-time updates')
+      console.log('SSE and WebSocket will handle real-time updates')
 
     } catch (error) {
       const errorTask = { 
@@ -278,7 +317,7 @@ function App() {
 
   const approvePhase = async (taskId: string, phaseId: string, approved: boolean, feedback?: string) => {
     try {
-      const response = await fetch('http://localhost:8081/api/phases/approve', {
+      const response = await fetch('http://localhost:8080/api/phases/approve', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

@@ -6,20 +6,20 @@ import (
 	"log"
 	"time"
 
-	pb "agentic-engineering-system/proto/agentic-engineering-system/proto"
+	pb "agentic-engineering-system/proto"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
 // ExecuteTaskOnAgent sends a task to an agent via gRPC and returns the result
-func ExecuteTaskOnAgent(address, taskID, persona, instructions string, contextData map[string]string) (*pb.TaskResult, error) {
+func ExecuteTaskOnAgent(address, taskID, persona, instructions string, contextData map[string]string, canDelegate bool) (*pb.TaskResult, error) {
 	// Retry logic for connection issues
 	maxRetries := 3
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		log.Printf("🔄 [%s] Attempt %d/%d: Connecting to agent at %s", taskID, attempt, maxRetries, address)
 
-		result, err := attemptTaskExecution(address, taskID, persona, instructions, contextData)
+		result, err := attemptTaskExecution(address, taskID, persona, instructions, contextData, canDelegate)
 		if err == nil {
 			return result, nil
 		}
@@ -36,7 +36,7 @@ func ExecuteTaskOnAgent(address, taskID, persona, instructions string, contextDa
 	return nil, fmt.Errorf("failed after %d attempts", maxRetries)
 }
 
-func attemptTaskExecution(address, taskID, persona, instructions string, contextData map[string]string) (*pb.TaskResult, error) {
+func attemptTaskExecution(address, taskID, persona, instructions string, contextData map[string]string, canDelegate bool) (*pb.TaskResult, error) {
 	// Connect to the agent using the exact pattern that works in minimal test
 	log.Printf("🔌 [%s] Establishing gRPC connection to %s", taskID, address)
 
@@ -67,6 +67,7 @@ func attemptTaskExecution(address, taskID, persona, instructions string, context
 		PersonaPrompt:    persona,
 		TaskInstructions: instructions,
 		ContextData:      contextData,
+		CanDelegate:      canDelegate,
 	}
 
 	// Execute the task using the same context as connection

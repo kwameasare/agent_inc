@@ -74,12 +74,12 @@ func (m *Manager) SpawnAgent(ctx context.Context) (*AgentContainer, error) {
 	log.Printf("🔑 Using OpenAI API key ending in: ...%s", openaiKey[len(openaiKey)-4:])
 	log.Printf("🔑 Full API key length: %d characters", len(openaiKey))
 	log.Printf("🔑 API key starts with: %s...", openaiKey[:20])
-	
+
 	// Prepare environment variables for the container
 	envVars := []string{"OPENAI_API_KEY=" + openaiKey}
-	log.Printf("🔑 Environment variable being passed: OPENAI_API_KEY=%s...%s (length: %d)", 
+	log.Printf("🔑 Environment variable being passed: OPENAI_API_KEY=%s...%s (length: %d)",
 		openaiKey[:20], openaiKey[len(openaiKey)-4:], len(openaiKey))
-	
+
 	// Create with minimal configuration that matches manual approach
 	resp, err := m.cli.ContainerCreate(ctx, &container.Config{
 		Image:        "agentic-engineering-system_generic_agent",
