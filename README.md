@@ -1,16 +1,18 @@
 # Agentic Engineering System
 
-A dynamic, hierarchical multi-agent AI system that functions as an elite autonomous engineering team spanning software, hardware, product, and safety departments. The system optimizes for scalability, collaboration, traceability, and review loops using efficient serverless/cloud-native infrastructure.
+A dynamic, phased multi-agent AI system that functions as an elite autonomous engineering team spanning software, hardware, product, and safety departments. The system implements **phased execution** with user approval workflows, optimizing for scalability, collaboration, traceability, and controlled delivery.
 
 ## Architecture
 
-The system implements a **hierarchical multi-agent architecture** with these core principles:
+The system implements a **phased multi-agent architecture** with these core principles:
 
 1. **Agents as a Commodity**: There is only one type of "worker" agent service. Its specialization (persona) is defined at runtime by the instruction prompt it receives.
 
-2. **Recursion as a Core Mechanic**: Any agent can become a manager. If a task is too complex, the agent's job is not to solve it directly, but to break it down and request that the Orchestrator spawn a team of sub-agents to handle the pieces.
+2. **Phased Execution**: Tasks are broken down into distinct phases by a Lead Agent, with each phase containing a maximum of 10 domain experts who execute their work in parallel without further delegation.
 
-This creates a **tree of tasks** that grows dynamically until every leaf-node task is simple enough for a single agent to execute.
+3. **User-Controlled Progression**: After each phase completes, the user is presented with the results and can decide whether to proceed to the next phase or stop the execution.
+
+This creates a **controlled, phased approach** where complex projects are systematically broken down into manageable phases with clear deliverables and approval gates.
 
 ## Components
 
@@ -23,17 +25,26 @@ This creates a **tree of tasks** that grows dynamically until every leaf-node ta
 ### 2. Orchestrator (Go)
 - **File**: `orchestrator/main.go`
 - **Role**: 
-  - Factory for agents (creates new instances on demand)
-  - Tree Manager (maintains state of entire task hierarchy) 
-  - Router (dispatches tasks and routes results)
+  - Lead Agent Coordinator (manages phased execution)
+  - Domain Expert Manager (spawns and coordinates up to 10 experts per phase)
+  - Phase Controller (handles phase completion and user approval)
   - Docker Manager (controls agent container lifecycle)
-- **Technology**: Go + Docker SDK + gRPC
+- **Technology**: Go + Docker SDK + gRPC + HTTP API for UI
 
-### 3. Task Tree Manager
+### 3. Web UI (React/Vite)
+- **Files**: `ui/src/*`
+- **Role**: 
+  - Real-time task and phase monitoring
+  - Phase completion visualization
+  - User approval workflow interface
+  - Expert status and progress tracking
+- **Technology**: React + TypeScript + Vite + Tailwind CSS
+
+### 4. Task Tree Manager
 - **File**: `orchestrator/tasktree/manager.go`
 - **Role**: Manages the hierarchical task structure with thread-safe operations
 
-### 4. Docker Manager
+### 5. Docker Manager
 - **File**: `orchestrator/docker/manager.go`
 - **Role**: Spawns and manages agent containers dynamically
 
@@ -73,86 +84,109 @@ This creates a **tree of tasks** that grows dynamically until every leaf-node ta
    ./build.sh
    ```
 
-4. **Run the orchestrator**:
+4. **Run the system**:
    ```bash
+   # Start the orchestrator
    cd orchestrator
-   go run .
+   go run . &
+   
+   # Start the web UI (in a new terminal)
+   cd ../ui
+   npm install
+   npm run dev
    ```
+
+5. **Access the web interface**:
+   - Open your browser to `http://localhost:5173`
+   - Submit tasks and monitor phased execution
+   - Approve or reject phase progressions
 
 ## How It Works
 
 ### 1. Initial Task Submission
-The system starts with a high-level task given to a Lead Agent (Project Manager persona).
+Submit a high-level task through the web UI or directly to the orchestrator API.
 
-### 2. Dynamic Task Decomposition
-- Each agent uses an LLM to decide: "Can I solve this alone, or is it too complex?"
-- **If simple**: Executes the task directly and returns results
-- **If complex**: Breaks it down into sub-tasks with specific personas and delegates
+### 2. Lead Agent Planning
+A Lead Agent (Project Manager persona) analyzes the task and creates a phased execution plan with:
+- **Phase breakdown**: Logical phases (e.g., "Requirements and Planning", "Design and Architecture")
+- **Domain experts**: Up to 10 specialists per phase with specific personas and tasks
+- **No sub-delegation**: Experts in Phase 1 complete their work directly without further delegation
 
-### 3. Recursive Agent Spawning
-- For each sub-task, the Orchestrator spawns a new agent container
-- Each container runs the same generic agent code but with different personas
-- Creates a tree structure: Lead → Department Heads → Specialists → Sub-specialists
+### 3. Phase Execution
+- All domain experts in the current phase execute their tasks in parallel
+- Each expert focuses on their specific domain expertise
+- Real-time progress monitoring through the web UI
 
-### 4. Result Synthesis
-- When all sub-tasks complete, parent agents synthesize the results
-- Results flow back up the hierarchy
-- Final output is a comprehensive, integrated deliverable
+### 4. Phase Completion and Approval
+- When all experts in a phase complete their work, the phase is marked as complete
+- User is presented with all expert results and the next phase plan
+- User can choose to:
+  - **Approve**: Proceed to the next phase
+  - **Reject**: Stop execution and review results
 
-### 5. Automatic Cleanup
-- Containers are automatically stopped and removed after use
-- Full traceability maintained throughout the process
+### 5. Iterative Progression
+- Approved phases trigger the next phase execution
+- Process continues until all phases complete or user stops
+- Final deliverable integrates all phase results
 
 ## Example Workflow
 
 ```
-Initial Task: "Design a scalable real-time chat application"
+Initial Task: "Create a user authentication system"
     ↓
-Lead Agent decides to delegate:
-    ├── Software Architecture Agent
-    ├── Database Design Agent  
-    ├── Frontend Design Agent
-    ├── Security Analysis Agent
-    └── Deployment Strategy Agent
+Lead Agent creates phased plan:
+
+Phase 1: "Requirements and Planning"
+    ├── Business Analyst → Requirements gathering
+    ├── UX Designer → User experience design  
+    ├── Technical Architect → System architecture
+    └── Security Specialist → Security requirements
         ↓
-Each may further delegate:
-Software Architecture Agent → 
-    ├── Backend API Specialist
-    ├── Real-time Communication Specialist
-    └── Microservices Design Specialist
+Phase 1 completes → User reviews results → Approves
         ↓
-Results synthesized back up the tree:
-    ← Specialists provide detailed designs
-    ← Department agents integrate their domains
-    ← Lead agent creates final comprehensive plan
+Phase 2: "Implementation and Testing"
+    ├── Backend Developer → API implementation
+    ├── Frontend Developer → UI implementation
+    ├── Database Engineer → Data layer design
+    ├── QA Engineer → Test plan and automation
+    └── DevOps Engineer → Deployment strategy
+        ↓
+Phase 2 completes → User reviews results → Can approve or stop
+        ↓
+Final deliverable: Complete authentication system with all components
 ```
 
 ## Key Features
 
-### 🔄 **Dynamic Scaling**
-- Agents spawn only when needed
-- Tree can grow to any depth based on task complexity
-- Automatic resource cleanup
+### 🎯 **Phased Execution**
+- Tasks broken into logical phases by Lead Agent
+- Maximum 10 domain experts per phase
+- No sub-delegation in Phase 1 for focused execution
 
-### 🎯 **Specialization**
-- Each agent focuses on its domain expertise
-- Personas defined at runtime for maximum flexibility
-- No hard-coded roles or limitations
+### 👤 **User Control**
+- Approval gates between phases
+- Real-time monitoring through web UI
+- Ability to stop execution at any phase
 
-### 🔍 **Full Traceability**
-- Every decision and delegation logged
-- Complete audit trail of reasoning
-- Easy debugging and process improvement
+### 🔄 **Parallel Processing**
+- All experts in a phase execute simultaneously
+- Efficient resource utilization
+- Faster completion times
 
-### 🤝 **Collaborative Intelligence**
-- Agents build on each other's work
-- Cross-domain consistency checking
-- Collective problem-solving approach
+### 🎭 **Dynamic Specialization**
+- Expert personas defined at runtime
+- Task-specific domain expertise
+- Flexible agent assignment
 
-### 🛡️ **Fault Tolerance**
-- Failed agents don't crash the system
-- Automatic retries and error handling
-- Graceful degradation
+### 🔍 **Full Transparency**
+- Complete phase and expert tracking
+- Real-time progress monitoring
+- Detailed result presentation
+
+### 🛡️ **Controlled Progression**
+- User approval required between phases
+- Risk mitigation through staged delivery
+- Quality gates at each phase
 
 ## Configuration
 
@@ -162,8 +196,20 @@ Results synthesized back up the tree:
 
 ### Model Configuration
 Modify in `agents/generic_agent/agent.py`:
-- **Decision Model**: `gpt-4o` (for complex reasoning)
-- **Execution Model**: `gpt-4-turbo` (for task execution)
+- **Decision Model**: `gpt-4o` (for phased planning)
+- **Execution Model**: `gpt-4-turbo` (for domain expert tasks)
+
+### Phase Configuration
+Modify in `orchestrator/main.go`:
+- **Max Experts per Phase**: 10 (configurable)
+- **Phase Timeout**: Adjustable per phase type
+- **Approval Timeout**: User approval wait time
+
+### UI Configuration
+Modify in `ui/src/config.ts`:
+- **API Base URL**: Orchestrator endpoint
+- **Polling Interval**: Real-time update frequency
+- **Theme**: UI appearance settings
 
 ### Container Configuration  
 Modify in `orchestrator/docker/manager.go`:
@@ -173,29 +219,40 @@ Modify in `orchestrator/docker/manager.go`:
 
 ## Monitoring & Debugging
 
+### Web UI Dashboard
+The React web interface provides:
+- **Real-time Task Monitoring**: Live updates on task progress
+- **Phase Visualization**: Clear phase breakdown and status
+- **Expert Tracking**: Individual expert progress and results
+- **Approval Workflow**: User-friendly phase approval interface
+
 ### Logs
 The system provides comprehensive logging:
-- Container spawning/stopping
-- Task delegation decisions  
-- gRPC communication
-- Result synthesis
+- **Phase Planning**: Lead agent decision-making
+- **Expert Execution**: Individual domain expert progress
+- **Container Management**: Docker lifecycle events
+- **API Communication**: HTTP and gRPC interactions
 
-### Task Tree Inspection
-The task tree maintains full state and can be inspected for debugging:
-- Task hierarchy visualization
-- Status tracking (pending, running, delegated, completed, failed)
-- Result aggregation
+### Phase State Inspection
+The system maintains detailed phase state:
+- **Phase Status**: Planning, executing, completed, approved
+- **Expert Status**: Individual expert progress tracking
+- **Result Aggregation**: Phase deliverable compilation
+- **User Decisions**: Approval/rejection history
 
 ## Extending the System
 
-### Adding New Personas
-Simply modify the initial prompt or add specialized personas in the main.go file.
+### Adding New Phase Types
+Modify the Lead Agent prompts in `orchestrator/main.go` to include new phase templates.
 
-### Custom Task Types
-Add new task types by modifying the agent decision logic in `agent.py`.
+### Custom Expert Personas
+Add specialized domain expert personas by extending the phase planning logic.
 
-### Additional Infrastructure
-Extend the Docker manager to support other container orchestration platforms.
+### Integration APIs
+Extend the HTTP API in `orchestrator/main.go` for external system integration.
+
+### UI Customization
+Modify React components in `ui/src/` for custom user experiences.
 
 ### Alternative LLM Providers
 LiteLLM supports many providers - just change the model name in the agent code.
@@ -218,22 +275,28 @@ LiteLLM supports many providers - just change the model name in the agent code.
    - System automatically handles port allocation
    - If issues persist, restart Docker
 
-5. **Agent containers not stopping**
-   - System includes automatic cleanup
-   - Manual cleanup: `docker stop $(docker ps -q --filter ancestor=agentic-engineering-system_generic_agent)`
+5. **"Web UI not loading"**
+   - Ensure Node.js and npm are installed
+   - Check if port 5173 is available
+   - Run `npm install` in the ui directory
 
-6. **gRPC connection timeouts with many sub-tasks**
-   - This is expected behavior when spawning many containers simultaneously
-   - The system will retry and eventually succeed with the synthesis
-   - For better performance, use a simpler initial task or increase timeout values
-   - Sub-task failures don't prevent the root synthesis from completing
+6. **"Phase not progressing"**
+   - Check that all experts in the phase have completed
+   - Review expert logs for any failures
+   - Verify user approval is not required
+
+7. **"Expert containers not spawning"**
+   - Verify Docker daemon is running
+   - Check Docker image exists: `agentic-engineering-system_generic_agent`
+   - Review container logs for startup issues
 
 ## Performance Considerations
 
-- **Parallel Execution**: Sub-tasks run concurrently when possible
-- **Resource Management**: Containers cleaned up immediately after use
-- **Model Selection**: Balance between capability and cost/speed
-- **Caching**: Results cached in task tree for potential reuse
+- **Parallel Phase Execution**: All experts in a phase run concurrently
+- **Resource Management**: Containers cleaned up immediately after expert completion
+- **Model Selection**: Balance between capability and cost/speed per expert
+- **UI Responsiveness**: Real-time updates without overwhelming the interface
+- **Phase Optimization**: Logical phase boundaries reduce unnecessary work
 
 ## Security Notes
 
@@ -244,12 +307,14 @@ LiteLLM supports many providers - just change the model name in the agent code.
 
 ## Future Enhancements
 
-- **Persistent Task Storage**: Database backend for task trees
-- **Web UI**: Visual task tree and progress monitoring
+- **Persistent Phase Storage**: Database backend for phase history
+- **Advanced UI Features**: Gantt charts, phase analytics, expert performance metrics
 - **Multi-Cloud Support**: Deploy across cloud providers
-- **Custom Agents**: Specialized agent types beyond generic
-- **Real-time Collaboration**: Human-in-the-loop capabilities
+- **Custom Expert Types**: Specialized agent types beyond generic personas
+- **Integration Hooks**: Webhooks and API integrations for external tools
+- **Phase Templates**: Pre-defined phase patterns for common project types
+- **Collaborative Features**: Multi-user approval workflows
 
 ## License
 
-This project demonstrates the principles outlined in the task description and steps documents. It showcases a production-ready implementation of a hierarchical multi-agent AI system.
+This project demonstrates a production-ready implementation of a phased multi-agent AI system with user-controlled progression and approval workflows. It showcases modern software architecture principles with real-time monitoring and collaborative intelligence.
