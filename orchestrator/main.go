@@ -208,6 +208,12 @@ func main() {
 		log.Fatal("OPENAI_API_KEY environment variable is required")
 	}
 
+	// Get port from environment variable, default to 8080
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
 	// Initialize BoltDB
 	var err error
 	db, err = bbolt.Open("orchestrator.db", 0600, &bbolt.Options{Timeout: 1 * time.Second})
@@ -256,8 +262,8 @@ func main() {
 	http.Handle("/", http.StripPrefix("/", fs))
 
 	log.Println("🚀 Orchestrator starting...")
-	log.Println("📡 HTTP API server listening on :8080")
-	log.Println("🌐 UI available at http://localhost:8080")
+	log.Printf("📡 HTTP API server listening on :%s", port)
+	log.Printf("🌐 UI available at http://localhost:%s", port)
 	log.Println("📊 API endpoints:")
 	log.Println("   POST /api/task - Submit new task")
 	log.Println("   GET  /api/task/{id} - Get task status")
@@ -266,7 +272,7 @@ func main() {
 	log.Println("   WS   /ws - WebSocket for real-time updates")
 	log.Println("   GET  /health - Health check")
 
-	if err := http.ListenAndServe(":8080", nil); err != nil {
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatalf("Server failed to start: %v", err)
 	}
 }
@@ -755,8 +761,9 @@ func executeDomainExpert(taskID string, phase *ProjectPhase, expert *DomainExper
 	// Execute the expert's task with empty context data
 	contextData := make(map[string]string)
 
-	// For Phase 1, delegation is not allowed.
-	isPhaseOne := phase.ID == "phase_1_planning" // Or a better check
+	// For Phase 1, delegation is not allowed. For others, it is.
+	// This is a simple check; a more robust system might have this as a property of the phase itself.
+	isPhaseOne := phase.ID == "phase_1_planning" || strings.HasPrefix(phase.ID, "phase-1")
 	canDelegate := !isPhaseOne
 
 	result, err := tasks.ExecuteTaskOnAgent(agentContainer.Address, expert.Role, expert.Persona, expert.Task, contextData, canDelegate)

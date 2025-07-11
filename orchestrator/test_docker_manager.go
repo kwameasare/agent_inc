@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"agentic-engineering-system/docker"
-	pb "agentic-engineering-system/proto/agentic-engineering-system/proto"
+	pb "agentic-engineering-system/proto"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"

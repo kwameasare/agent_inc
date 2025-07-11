@@ -160,37 +160,38 @@ Important: If you're synthesizing results from sub-agents (context data is provi
             
             logger.info(f"🎯 Task {request.task_id}: Decision = {decision}, Reason = {reason}")
 
-            # Step 2: Act on the decision.
+            # --- MODIFICATION: Enforce the can_delegate flag ---
+            if decision == "delegate" and not request.can_delegate:
+                logger.warning(f"Task {request.task_id}: Agent decided to delegate, but was not permitted by the orchestrator. Forcing execution.")
+                decision = "execute" # Override the LLM's decision
+            # --- END MODIFICATION ---
+
+            # Step 2: Act on the (potentially overridden) decision.
             if decision == "delegate":
-                # --- MODIFICATION: Enforce the rule ---
-                if not request.can_delegate:
-                    logger.warning(f"Task {request.task_id}: Agent chose 'delegate' but was not permitted. Overriding to 'execute'.")
-                    decision = "execute"
-                else:
-                    logger.info(f"🔀 Task {request.task_id}: Delegating to sub-agents...")
-                    # The agent has decided to break down the task.
-                    # Populate the sub_tasks field for the orchestrator.
-                    result = agent_pb2.TaskResult(task_id=request.task_id, success=True)
-                    sub_tasks = decision_data.sub_tasks
-                    
-                    if not sub_tasks:
-                        error_msg = "Decision was 'delegate' but no sub_tasks provided"
-                        logger.error(f"❌ Task {request.task_id}: {error_msg}")
-                        return agent_pb2.TaskResult(
-                            task_id=request.task_id, 
-                            success=False, 
-                            error_message=error_msg
-                        )
-                    
-                    for i, sub_task_data in enumerate(sub_tasks):
-                        sub_task = result.sub_tasks.add()
-                        sub_task.requested_persona = sub_task_data.requested_persona
-                        sub_task.task_details = sub_task_data.task_details
-                        logger.info(f"📋 Task {request.task_id}: Created sub-task {i+1}: {sub_task_data.requested_persona[:50]}...")
-                    
-                    elapsed = time.time() - start_time
-                    logger.info(f"✅ Task {request.task_id}: Completed delegation in {elapsed:.2f}s with {len(sub_tasks)} sub-tasks")
-                    return result
+                logger.info(f"🔀 Task {request.task_id}: Delegating to sub-agents...")
+                # The agent has decided to break down the task.
+                # Populate the sub_tasks field for the orchestrator.
+                result = agent_pb2.TaskResult(task_id=request.task_id, success=True)
+                sub_tasks = decision_data.sub_tasks
+                
+                if not sub_tasks:
+                    error_msg = "Decision was 'delegate' but no sub_tasks provided"
+                    logger.error(f"❌ Task {request.task_id}: {error_msg}")
+                    return agent_pb2.TaskResult(
+                        task_id=request.task_id, 
+                        success=False, 
+                        error_message=error_msg
+                    )
+                
+                for i, sub_task_data in enumerate(sub_tasks):
+                    sub_task = result.sub_tasks.add()
+                    sub_task.requested_persona = sub_task_data.requested_persona
+                    sub_task.task_details = sub_task_data.task_details
+                    logger.info(f"📋 Task {request.task_id}: Created sub-task {i+1}: {sub_task_data.requested_persona[:50]}...")
+                
+                elapsed = time.time() - start_time
+                logger.info(f"✅ Task {request.task_id}: Completed delegation in {elapsed:.2f}s with {len(sub_tasks)} sub-tasks")
+                return result
 
             if decision == "execute":  # Note: now an `if` instead of `elif`
                 logger.info(f"⚡ Task {request.task_id}: Executing task directly...")

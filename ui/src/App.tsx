@@ -93,7 +93,7 @@ function App() {
   // WebSocket connection and message handling
   useEffect(() => {
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const wsUrl = `${wsProtocol}//${window.location.host}/ws`
+    const wsUrl = `${wsProtocol}//localhost:8081/ws`
     
     const connect = () => {
       wsRef.current = new WebSocket(wsUrl)
@@ -136,7 +136,7 @@ function App() {
   // SSE connection for real-time task updates
   useEffect(() => {
     if (currentTask?.status === 'running' && currentTask.orchestratorId) {
-      const eventSource = new EventSource(`http://localhost:8080/api/task/${currentTask.orchestratorId}/events`)
+      const eventSource = new EventSource(`http://localhost:8081/api/task/${currentTask.orchestratorId}/events`)
       eventSourceRef.current = eventSource
       
       eventSource.onmessage = (event) => {
@@ -198,7 +198,7 @@ function App() {
   const updateTaskFromWebSocket = async (taskId: string) => {
     // Fetch the latest task status from the API
     try {
-      const response = await fetch(`http://localhost:8080/api/task/${taskId}`)
+      const response = await fetch(`http://localhost:8081/api/task/${taskId}`)
       if (response.ok) {
         const updatedTask = await response.json()
         
@@ -211,7 +211,8 @@ function App() {
               error: updatedTask.error,
               phases: updatedTask.phases,
               currentPhase: updatedTask.currentPhase,
-              requiresUserApproval: updatedTask.requiresUserApproval
+              requiresUserApproval: updatedTask.requiresUserApproval,
+              orchestratorId: task.orchestratorId || taskId // Preserve orchestratorId
             }
             
             // Update current task if it's the one being updated
@@ -231,7 +232,7 @@ function App() {
 
   const fetchTaskStatus = async (taskId: string) => {
     try {
-      const response = await fetch(`http://localhost:8080/api/task/${taskId}`)
+      const response = await fetch(`http://localhost:8081/api/task/${taskId}`)
       if (response.ok) {
         const taskStatus = await response.json()
         
@@ -244,7 +245,8 @@ function App() {
               error: taskStatus.error,
               phases: taskStatus.phases,
               currentPhase: taskStatus.currentPhase,
-              requiresUserApproval: taskStatus.requiresUserApproval
+              requiresUserApproval: taskStatus.requiresUserApproval,
+              orchestratorId: task.orchestratorId || taskId // Preserve orchestratorId
             }
             
             if (currentTask && (currentTask.orchestratorId === taskId || currentTask.id === taskId)) {
@@ -275,7 +277,7 @@ function App() {
 
     try {
       // Call orchestrator API to submit task
-      const response = await fetch('http://localhost:8080/api/task', {
+      const response = await fetch('http://localhost:8081/api/task', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -317,7 +319,7 @@ function App() {
 
   const approvePhase = async (taskId: string, phaseId: string, approved: boolean, feedback?: string) => {
     try {
-      const response = await fetch('http://localhost:8080/api/phases/approve', {
+      const response = await fetch('http://localhost:8081/api/phases/approve', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

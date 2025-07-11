@@ -149,7 +149,7 @@ export DATABASE_URL="postgres://postgres:password@localhost:5432/agent_inc?sslmo
 cd orchestrator
 go build && ./orchestrator
 
-# Access system at http://localhost:8080
+# Access system at http://localhost:8081 (or the configured PORT)
 ```
 
 ## 📊 Feature Comparison

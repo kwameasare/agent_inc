@@ -1,63 +1,13 @@
-import { CheckCircle, XCircle, Clock, Loader2, FileText, AlertTriangle, Users, CheckCircle2, Pause, Eye } from 'lucide-react'
+import { CheckCircle, XCircle, Clock, Loader2, FileText, AlertTriangle, Users, Pause, Eye } from 'lucide-react'
 import { useState } from 'react'
 import type { Task } from '../App'
 import { ExpertResultsModal } from './ExpertResultsModal'
+import { ExpertDetails } from './ExpertDetails'
 
 interface TaskResultProps {
   task: Task | null
   onApprovePhase?: (taskId: string, phaseId: string, approved: boolean, feedback?: string) => Promise<any>
 }
-
-// NEW component for displaying a single expert with expandable details
-const ExpertDetails = ({ expert }: { expert: any }) => {
-  const [isExpanded, setIsExpanded] = useState(false);
-
-  const getExpertStatusIcon = (status: string) => {
-    switch (status) {
-      case 'completed':
-        return <CheckCircle2 className="w-5 h-5 text-green-600" />
-      case 'running':
-        return <Loader2 className="w-5 h-5 text-blue-600 animate-spin" />
-      case 'failed':
-        return <XCircle className="w-5 h-5 text-red-600" />
-      default:
-        return <Clock className="w-5 h-5 text-gray-500" />
-    }
-  }
-
-  return (
-    <div className="bg-white bg-opacity-50 rounded-lg p-3 my-2">
-      <div
-        className="flex items-center justify-between cursor-pointer"
-        onClick={() => setIsExpanded(!isExpanded)}
-      >
-        <div className="flex items-center space-x-3">
-          {getExpertStatusIcon(expert.status)}
-          <div>
-            <p className="font-semibold text-gray-800">{expert.role}</p>
-            <p className="text-sm text-gray-600">{expert.expertise}</p>
-          </div>
-        </div>
-        <div className={`px-2 py-1 rounded text-xs font-bold ${
-          expert.status === 'completed' ? 'bg-green-100 text-green-800' :
-          expert.status === 'running' ? 'bg-blue-100 text-blue-800' :
-          expert.status === 'failed' ? 'bg-red-100 text-red-800' :
-          'bg-gray-100 text-gray-600'
-        }`}>
-          {expert.status.toUpperCase()}
-        </div>
-      </div>
-      {isExpanded && expert.status === 'completed' && (
-        <div className="mt-3 pt-3 border-t border-gray-200">
-          <h6 className="font-bold text-gray-800 text-sm mb-1">Expert's Report:</h6>
-          <pre className="text-xs text-gray-700 whitespace-pre-wrap font-mono bg-gray-50 p-2 rounded">
-            {expert.result || "No result was provided by the agent."}
-          </pre>
-        </div>
-      )}
-    </div>
-  );
-};
 
 export function TaskResult({ task, onApprovePhase }: TaskResultProps) {
   const [phaseApprovalFeedback, setPhaseApprovalFeedback] = useState<{ [key: string]: string }>({})
@@ -333,8 +283,8 @@ export function TaskResult({ task, onApprovePhase }: TaskResultProps) {
                   
                   {/* Domain Experts */}
                   {phase.experts && phase.experts.length > 0 && (
-                    <div className="ml-4 space-y-3">
-                      <h5 className="text-lg font-bold text-gray-700 mb-3">Domain Experts:</h5>
+                    <div className="ml-4 mt-4 space-y-1">
+                      <h5 className="text-lg font-bold text-gray-700 mb-2">Domain Experts Assigned:</h5>
                       {phase.experts.map((expert, expertIndex) => (
                         <ExpertDetails key={expertIndex} expert={expert} />
                       ))}
