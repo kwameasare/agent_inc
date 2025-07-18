@@ -11,12 +11,11 @@ import (
 	"sync"
 	"time"
 
+	"agentic-engineering-system/database"
 	"agentic-engineering-system/docker"
 	"agentic-engineering-system/tasks"
 	"agentic-engineering-system/tasktree"
 	"agentic-engineering-system/websocket"
-
-	"go.etcd.io/bbolt"
 )
 
 // Global state for the orchestrator
@@ -24,7 +23,7 @@ var (
 	dockerManager *docker.Manager
 	currentTasks  = make(map[string]*TaskExecution)
 	tasksMutex    sync.RWMutex
-	db            *bbolt.DB
+	db            *database.DB
 	wsHub         *websocket.Hub
 	sseClients    = make(map[string]chan string)
 	sseMutex      sync.RWMutex
@@ -86,52 +85,142 @@ type TaskResponse struct {
 	Status string `json:"status"`
 }
 
-// BoltDB Functions
+// Database Functions
 func saveTaskState(execution *TaskExecution) error {
-	return db.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte("tasks"))
-		encoded, err := json.Marshal(execution)
-		if err != nil {
-			return fmt.Errorf("failed to serialize task %s: %w", execution.ID, err)
+	// Convert to database.TaskExecution type
+	dbTask := &database.TaskExecution{
+		ID:                   execution.ID,
+		Task:                 execution.Task,
+		Status:               execution.Status,
+		Result:               execution.Result,
+		Error:                execution.Error,
+		Started:              execution.Started,
+		Phases:               convertToDBPhases(execution.Phases),
+		CurrentPhase:         execution.CurrentPhase,
+		RequiresUserApproval: execution.RequiresUserApproval,
+		CreatedAt:            execution.CreatedAt,
+		UpdatedAt:            execution.UpdatedAt,
+	}
+	return db.SaveTask(dbTask)
+}
+
+func convertToDBPhases(phases []ProjectPhase) []database.ProjectPhase {
+	dbPhases := make([]database.ProjectPhase, len(phases))
+	for i, phase := range phases {
+		dbPhases[i] = database.ProjectPhase{
+			ID:           phase.ID,
+			Name:         phase.Name,
+			Description:  phase.Description,
+			Status:       phase.Status,
+			Experts:      convertToDBExperts(phase.Experts),
+			Results:      phase.Results,
+			StartTime:    phase.StartTime,
+			EndTime:      phase.EndTime,
+			Approved:     phase.Approved,
+			UserFeedback: phase.UserFeedback,
 		}
-		return b.Put([]byte(execution.ID), encoded)
-	})
+	}
+	return dbPhases
+}
+
+func convertToDBExperts(experts []DomainExpert) []database.DomainExpert {
+	dbExperts := make([]database.DomainExpert, len(experts))
+	for i, expert := range experts {
+		dbExperts[i] = database.DomainExpert{
+			Role:      expert.Role,
+			Expertise: expert.Expertise,
+			Persona:   expert.Persona,
+			Task:      expert.Task,
+			Status:    expert.Status,
+			Result:    expert.Result,
+		}
+	}
+	return dbExperts
 }
 
 func loadTaskState(taskID string) (*TaskExecution, error) {
-	var execution TaskExecution
-	err := db.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte("tasks"))
-		data := b.Get([]byte(taskID))
-		if data == nil {
-			return fmt.Errorf("task %s not found in DB", taskID)
-		}
-		if err := json.Unmarshal(data, &execution); err != nil {
-			return fmt.Errorf("failed to deserialize task %s: %w", taskID, err)
-		}
-		return nil
-	})
+	dbTask, err := db.GetTask(taskID)
 	if err != nil {
 		return nil, err
 	}
-	return &execution, nil
+	if dbTask == nil {
+		return nil, fmt.Errorf("task %s not found in DB", taskID)
+	}
+
+	// Convert back to main.TaskExecution type
+	execution := &TaskExecution{
+		ID:                   dbTask.ID,
+		Task:                 dbTask.Task,
+		Status:               dbTask.Status,
+		Result:               dbTask.Result,
+		Error:                dbTask.Error,
+		Started:              dbTask.Started,
+		Phases:               convertFromDBPhases(dbTask.Phases),
+		CurrentPhase:         dbTask.CurrentPhase,
+		RequiresUserApproval: dbTask.RequiresUserApproval,
+		CreatedAt:            dbTask.CreatedAt,
+		UpdatedAt:            dbTask.UpdatedAt,
+	}
+	return execution, nil
+}
+
+func convertFromDBPhases(dbPhases []database.ProjectPhase) []ProjectPhase {
+	phases := make([]ProjectPhase, len(dbPhases))
+	for i, dbPhase := range dbPhases {
+		phases[i] = ProjectPhase{
+			ID:           dbPhase.ID,
+			Name:         dbPhase.Name,
+			Description:  dbPhase.Description,
+			Status:       dbPhase.Status,
+			Experts:      convertFromDBExperts(dbPhase.Experts),
+			Results:      dbPhase.Results,
+			StartTime:    dbPhase.StartTime,
+			EndTime:      dbPhase.EndTime,
+			Approved:     dbPhase.Approved,
+			UserFeedback: dbPhase.UserFeedback,
+		}
+	}
+	return phases
+}
+
+func convertFromDBExperts(dbExperts []database.DomainExpert) []DomainExpert {
+	experts := make([]DomainExpert, len(dbExperts))
+	for i, dbExpert := range dbExperts {
+		experts[i] = DomainExpert{
+			Role:      dbExpert.Role,
+			Expertise: dbExpert.Expertise,
+			Persona:   dbExpert.Persona,
+			Task:      dbExpert.Task,
+			Status:    dbExpert.Status,
+			Result:    dbExpert.Result,
+		}
+	}
+	return experts
 }
 
 func loadAllTasks() ([]*TaskExecution, error) {
-	var tasks []*TaskExecution
-	err := db.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte("tasks"))
-		return b.ForEach(func(k, v []byte) error {
-			var execution TaskExecution
-			if err := json.Unmarshal(v, &execution); err != nil {
-				log.Printf("Warning: Failed to deserialize task %s: %v", string(k), err)
-				return nil // Continue with other tasks
-			}
-			tasks = append(tasks, &execution)
-			return nil
-		})
-	})
-	return tasks, err
+	dbTasks, err := db.GetAllTasks()
+	if err != nil {
+		return nil, err
+	}
+
+	tasks := make([]*TaskExecution, len(dbTasks))
+	for i, dbTask := range dbTasks {
+		tasks[i] = &TaskExecution{
+			ID:                   dbTask.ID,
+			Task:                 dbTask.Task,
+			Status:               dbTask.Status,
+			Result:               dbTask.Result,
+			Error:                dbTask.Error,
+			Started:              dbTask.Started,
+			Phases:               convertFromDBPhases(dbTask.Phases),
+			CurrentPhase:         dbTask.CurrentPhase,
+			RequiresUserApproval: dbTask.RequiresUserApproval,
+			CreatedAt:            dbTask.CreatedAt,
+			UpdatedAt:            dbTask.UpdatedAt,
+		}
+	}
+	return tasks, nil
 }
 
 // Broadcast updates to WebSocket clients (similar to SSE concept)
@@ -214,23 +303,20 @@ func main() {
 		port = "8080"
 	}
 
-	// Initialize BoltDB
+	// Initialize PostgreSQL database
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		log.Fatalf("FATAL: DATABASE_URL environment variable is required")
+	}
+
 	var err error
-	db, err = bbolt.Open("orchestrator.db", 0600, &bbolt.Options{Timeout: 1 * time.Second})
+	db, err = database.NewDB(databaseURL)
 	if err != nil {
-		log.Fatalf("FATAL: Could not open database: %v", err)
+		log.Fatalf("FATAL: Could not connect to database: %v", err)
 	}
 	defer db.Close()
 
-	err = db.Update(func(tx *bbolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists([]byte("tasks"))
-		return err
-	})
-	if err != nil {
-		log.Fatalf("FATAL: Could not create tasks bucket: %v", err)
-	}
-
-	log.Printf("✅ BoltDB initialized successfully")
+	log.Printf("✅ PostgreSQL database initialized successfully")
 
 	// Load existing tasks from database
 	loadTasksFromDB()
